@@ -1,0 +1,14 @@
+{
+  "id": "db892b01",
+  "history": [
+    {
+      "role": "user",
+      "content": "\nUSER: COMMAND: Follow Suggestion\nCONTEXT: Cora is Online.\nHINT: Ask me anything.\nINSTRUCTION: Provide the corrected code or text immediately."
+    },
+    {
+      "role": "assistant",
+      "content": " Understood"
+    }
+  ],
+  "title": "'Summarize User Query'"
+}

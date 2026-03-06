@@ -1,0 +1,14 @@
+{
+  "id": "e6942330",
+  "history": [
+    {
+      "role": "user",
+      "content": "\nUSER: COMMAND: Follow Suggestion\nCONTEXT: Cora is Online.\nHINT: Ask me anything.\nINSTRUCTION: Provide the corrected code or text immediately."
+    },
+    {
+      "role": "assistant",
+      "content": " Sure, I'm here to help! What would you like me to assist you with? "
+    }
+  ],
+  "title": "Follow Suggestion"
+}

@@ -1,0 +1,22 @@
+{
+  "id": "80a0f180",
+  "history": [
+    {
+      "role": "user",
+      "content": "\nUSER: COMMAND: Follow Suggestion\nCONTEXT: Cora is Online.\nHINT: Ask me anything.\nINSTRUCTION: Provide the corrected code or text immediately."
+    },
+    {
+      "role": "assistant",
+      "content": " Sure, I'm here to help you with any questions or issues you might have. How can I assist you today? "
+    },
+    {
+      "role": "user",
+      "content": "\nUSER: hi"
+    },
+    {
+      "role": "assistant",
+      "content": " Hello! How can I assist you today? "
+    }
+  ],
+  "title": "How to ask questions in chatbot"
+}
