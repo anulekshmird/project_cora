@@ -1,0 +1,14 @@
+{
+  "id": "8be3b938",
+  "history": [
+    {
+      "role": "user",
+      "content": "\nUSER: COMMAND: Follow Suggestion\nCONTEXT: Cora is Online.\nHINT: Ask me anything.\nINSTRUCTION: Provide the corrected code or text immediately."
+    },
+    {
+      "role": "assistant",
+      "content": " Syntax Error at line 10: Expected '}' to end a function call.\nFix: Replace } with {\n```scss\nfunction example() {\n   // your code here\n}\n```\nCorrected Code:\n```csharp\nfunction example() {\n   // your code here\n}\n``` "
+    }
+  ],
+  "title": "Cora Online - Ask Me Anything"
+}

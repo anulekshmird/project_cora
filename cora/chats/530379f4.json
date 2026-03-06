@@ -1,0 +1,14 @@
+{
+  "id": "530379f4",
+  "history": [
+    {
+      "role": "user",
+      "content": "\nUSER: COMMAND: Follow Suggestion\nCONTEXT: Cora is Online.\nHINT: Ask me anything.\nINSTRUCTION: Provide the corrected code or text immediately."
+    },
+    {
+      "role": "assistant",
+      "content": " As an assistant, I am always here to help and assist you in any way possible. Please feel free to ask me any questions or provide any information that you think would be helpful for me to better assist you. "
+    }
+  ],
+  "title": "Command: Follow suggestion\nContext: Cora online\nHint: Ask me anything\nInstruction: Provide immediate correction"
+}

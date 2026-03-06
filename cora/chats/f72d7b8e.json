@@ -1,0 +1,14 @@
+{
+  "id": "f72d7b8e",
+  "history": [
+    {
+      "role": "user",
+      "content": "\nUSER: COMMAND: Follow Suggestion\nCONTEXT: Email:\nHINT: To initiate typing in the active email field\nINSTRUCTION: Provide the corrected code or text immediately."
+    },
+    {
+      "role": "assistant",
+      "content": " As Cora, I understand that you have requested me to follow a suggestion provided in an email. However, without specific details about the content of the email, it is not possible for me to provide you with the exact correction. Please provide me with the necessary information so that I can assist you accordingly. "
+    }
+  ],
+  "title": "'Correct Code for Email'"
+}

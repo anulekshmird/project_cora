@@ -1,0 +1,9 @@
+mss
+google-generativeai
+pystray
+Pillow
+PyQt6
+ollama
+keyboard
+SpeechRecognition
+pyaudio

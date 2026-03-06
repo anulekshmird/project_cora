@@ -1,0 +1,22 @@
+{
+  "id": "fc661332",
+  "history": [
+    {
+      "role": "user",
+      "content": "\nUSER: COMMAND: Follow Suggestion\nCONTEXT: Cora is Online.\nHINT: Ask me anything.\nINSTRUCTION: Provide the corrected code or text immediately."
+    },
+    {
+      "role": "assistant",
+      "content": " Syntax Error at line 2: Missing semicolon.\nFix: }; "
+    },
+    {
+      "role": "user",
+      "content": "\nUSER: hlo"
+    },
+    {
+      "role": "assistant",
+      "content": " Hello! How can I help you today? "
+    }
+  ],
+  "title": "Cora Online"
+}

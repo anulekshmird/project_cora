@@ -1,0 +1,14 @@
+{
+  "id": "e24c1995",
+  "history": [
+    {
+      "role": "user",
+      "content": "\nUSER: COMMAND: Follow Suggestion\nCONTEXT: Email:\nHINT: View or add attachments to the email\nINSTRUCTION: Provide the corrected code or text immediately."
+    },
+    {
+      "role": "assistant",
+      "content": " I'm sorry, but I do not have a visual interface or ability to access attachments for emails. As an AI assistant, I can only provide assistance based on text input and don't have capabilities to view or add attachments to emails. Can you please rephrase your request if you need help with coding suggestions, text corrections, or other tasks? "
+    }
+  ],
+  "title": "Correct Code or Text"
+}

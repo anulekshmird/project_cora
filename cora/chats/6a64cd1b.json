@@ -1,0 +1,22 @@
+{
+  "id": "6a64cd1b",
+  "history": [
+    {
+      "role": "user",
+      "content": "\nUSER: COMMAND: Follow Suggestion\nCONTEXT: Cora is Online.\nHINT: Ask me anything.\nINSTRUCTION: Provide the corrected code or text immediately."
+    },
+    {
+      "role": "assistant",
+      "content": " As an assistant, I am here to help you with any questions or tasks you may have. If you have a specific command or task in mind, please let me know and I will do my best to assist you. For example, if you need assistance with fixing spelling or code, simply type \"Fix Spelling\" or \"Fix Code\" followed by the text or code that needs to be corrected, and I will provide you with the corrected version immediately. Additionally, if you need help with a task or question, please do not hesitate to ask, and I will do my best to assist you in a concise and helpful manner. "
+    },
+    {
+      "role": "user",
+      "content": "\nUSER: hlo"
+    },
+    {
+      "role": "assistant",
+      "content": " Hello! How can I help you today? Is there something specific you would like assistance with? "
+    }
+  ],
+  "title": "Summarize user query"
+}

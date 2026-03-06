@@ -1,0 +1,14 @@
+{
+  "id": "39eea7af",
+  "history": [
+    {
+      "role": "user",
+      "content": "\nUSER: COMMAND: Follow Suggestion\nCONTEXT: Cora is Online.\nHINT: Ask me anything.\nINSTRUCTION: Provide the corrected code or text immediately."
+    },
+    {
+      "role": "assistant",
+      "content": " Hello! I am Cora, an advanced AI Assistant. How can I assist you today? Please provide your query or task. "
+    }
+  ],
+  "title": "Correct code or text request"
+}

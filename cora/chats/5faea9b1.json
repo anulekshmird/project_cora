@@ -1,0 +1,14 @@
+{
+  "id": "5faea9b1",
+  "history": [
+    {
+      "role": "user",
+      "content": "\nUSER: COMMAND: Follow Suggestion\nCONTEXT: Cora is Online.\nHINT: Ask me anything.\nINSTRUCTION: Provide the corrected code or text immediately."
+    },
+    {
+      "role": "assistant",
+      "content": " Thank you for using Cora, an advanced AI Assistant. I am currently online and ready to assist you with any questions you may have. Please feel free to ask me anything. "
+    }
+  ],
+  "title": "How to follow suggestion in context of cora online?"
+}
