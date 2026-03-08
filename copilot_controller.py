@@ -8,6 +8,8 @@ import config
 
 
 class CopilotController(QThread):
+    hide_bubble_signal = pyqtSignal()  # ← cross-thread safe UI call
+
     def __init__(self, context_engine, observer, overlay):
         super().__init__()
         self.context_engine = context_engine
@@ -26,6 +28,7 @@ class CopilotController(QThread):
 
         self.overlay.dismissed.connect(self.on_user_dismissed)
         self.overlay.snoozed.connect(self.on_user_snoozed)
+        self.hide_bubble_signal.connect(self.overlay.hide_bubble)
 
         self.last_active_window      = None
         self.last_writing_check_time = 0
@@ -127,11 +130,8 @@ class CopilotController(QThread):
                     self.last_suggestion_sig    = None
                     self.last_visual_sig        = None
                     self.presence_message_shown = False
-                    self.dismissed_signatures.clear()   # ← fresh start for new window
-                    try:
-                        self.overlay.hide_bubble()
-                    except Exception:
-                        pass
+                    self.dismissed_signatures.clear()
+                    self.hide_bubble_signal.emit()  # ← thread-safe UI call
                     time.sleep(0.5)
                     continue
 
@@ -182,8 +182,13 @@ class CopilotController(QThread):
                     )
                 )
                 is_browser = (
-                    any(x in win_lower for x in ["- google chrome", "- mozilla firefox",
-                                                  "- microsoft edge", "- brave"])
+                    (
+                        any(x in win_lower for x in ["- google chrome", "- mozilla firefox",
+                                                      "- microsoft edge", "- brave"])
+                        or win_lower.strip() in ("claude", "chatgpt", "perplexity")
+                        or (site_name.lower() in ("claude", "chatgpt", "openrouter",
+                                                   "perplexity", "gemini") and not is_youtube)
+                    )
                     and not is_youtube
                     and site_name.lower() not in ("youtube", "netflix", "twitch")
                 )
@@ -263,70 +268,216 @@ class CopilotController(QThread):
                         self.observer.signals.suggestion_ready.emit(app_suggestion)
                         suggestion_triggered = True
 
-                # ── P3: App-specific static suggestions ──────────────
+                # ── P3: App-specific context-aware suggestions ────────
                 if not suggestion_triggered:
                     app_suggestion = None
 
+                    # ── Word ──────────────────────────────────────────────
                     if is_word:
+                        # Extract document name from window title
+                        import re as _re
+                        doc_name = _re.sub(
+                            r'\s*[-—]\s*(compatibility mode\s*)?[-—]?\s*word.*$', '',
+                            current_window, flags=_re.IGNORECASE
+                        ).strip() or "your document"
+
+                        # Use OCR to detect what section they're in
+                        ocr_lower = current_ocr.lower()
+                        if any(x in ocr_lower for x in ["introduction", "abstract", "objective"]):
+                            edit_hint = "introduction or abstract section"
+                        elif any(x in ocr_lower for x in ["conclusion", "summary", "result"]):
+                            edit_hint = "conclusion or results section"
+                        elif any(x in ocr_lower for x in ["acknowledgement", "thank", "grateful"]):
+                            edit_hint = "acknowledgement section"
+                        elif any(x in ocr_lower for x in ["reference", "bibliography", "citation"]):
+                            edit_hint = "references section"
+                        else:
+                            edit_hint = "document"
+
                         app_suggestion = {
                             "type":        "writing_suggestion",
-                            "reason":      "Editing a Word document",
-                            "reason_long": "Cora can summarize, improve grammar, or rewrite sections.",
+                            "reason":      f"Editing {doc_name}",
+                            "reason_long": f"You're working on the {edit_hint} of \"{doc_name}\". Cora can improve grammar, rewrite sections, or summarize.",
                             "confidence":  0.9,
                             "suggestions": [
-                                {"label": "Summarize",       "hint": "Summarize this document section"},
-                                {"label": "Improve Grammar", "hint": "Fix grammar and clarity"},
-                                {"label": "Rewrite",         "hint": "Rewrite this paragraph more clearly"},
-                                {"label": "Key Points",      "hint": "Extract key ideas"},
+                                {"label": "Improve Grammar", "hint": f"Fix grammar and clarity in the {edit_hint}"},
+                                {"label": "Rewrite Section", "hint": f"Rewrite the {edit_hint} more clearly"},
+                                {"label": "Summarize",       "hint": f"Summarize the {edit_hint}"},
+                                {"label": "Key Points",      "hint": "Extract the main ideas from this section"},
                             ],
                         }
+
+                    # ── Excel ─────────────────────────────────────────────
                     elif is_excel:
+                        import re as _re
+                        file_name = _re.sub(
+                            r'\s*[-—]\s*excel.*$', '', current_window,
+                            flags=_re.IGNORECASE
+                        ).strip() or "your spreadsheet"
+
+                        ocr_lower = current_ocr.lower()
+                        if any(x in ocr_lower for x in ["sum", "average", "count", "=if", "=vlookup"]):
+                            excel_hint = "formula or calculation"
+                            chips = [
+                                {"label": "Explain Formula",  "hint": "Explain what this formula does"},
+                                {"label": "Fix Formula",      "hint": "Check and fix any formula errors"},
+                                {"label": "Optimize",         "hint": "Suggest a better formula"},
+                                {"label": "How It Works",     "hint": "Walk me through this formula step by step"},
+                            ]
+                        elif any(x in ocr_lower for x in ["total", "revenue", "expense", "budget", "profit"]):
+                            excel_hint = "financial data"
+                            chips = [
+                                {"label": "Analyze Trends",   "hint": "Identify trends in this financial data"},
+                                {"label": "Summarize Data",   "hint": "Summarize the key figures"},
+                                {"label": "Suggest Chart",    "hint": "What chart type best shows this data?"},
+                                {"label": "Find Anomalies",   "hint": "Are there any unusual values?"},
+                            ]
+                        else:
+                            excel_hint = "spreadsheet data"
+                            chips = [
+                                {"label": "Analyze Data",     "hint": "Find patterns or insights in this data"},
+                                {"label": "Explain Formula",  "hint": "Explain any formulas on screen"},
+                                {"label": "Suggest Chart",    "hint": "What visualization fits this data?"},
+                                {"label": "Summarize",        "hint": "Give me a summary of this spreadsheet"},
+                            ]
+
                         app_suggestion = {
                             "type":        "spreadsheet_suggestion",
-                            "reason":      "Working with a spreadsheet",
-                            "reason_long": "Cora can analyze data patterns or explain formulas.",
+                            "reason":      f"Working on {file_name}",
+                            "reason_long": f"You're editing {excel_hint} in \"{file_name}\". Cora can explain formulas, analyze data, or suggest visualizations.",
                             "confidence":  0.9,
-                            "suggestions": [
-                                {"label": "Explain Formula", "hint": "Explain spreadsheet formulas"},
-                                {"label": "Analyze Data",    "hint": "Find patterns in this data"},
-                                {"label": "Summary",         "hint": "Summarize the spreadsheet content"},
-                            ],
+                            "suggestions": chips,
                         }
+
+                    # ── PDF ───────────────────────────────────────────────
                     elif is_pdf:
+                        import re as _re
+                        pdf_name = _re.sub(
+                            r'\s*[-—]\s*(adobe acrobat|foxit|pdf).*$', '',
+                            current_window, flags=_re.IGNORECASE
+                        ).strip() or "this PDF"
+
+                        ocr_lower = current_ocr.lower()
+                        if any(x in ocr_lower for x in ["clause", "agreement", "party", "hereby", "whereas"]):
+                            pdf_hint = "legal document"
+                            chips = [
+                                {"label": "Explain Clause",   "hint": "Explain this clause in plain English"},
+                                {"label": "Key Terms",        "hint": "What are the important terms?"},
+                                {"label": "Summarize",        "hint": "Summarize the visible section"},
+                                {"label": "Red Flags",        "hint": "Are there any concerning clauses?"},
+                            ]
+                        elif any(x in ocr_lower for x in ["abstract", "methodology", "hypothesis", "figure"]):
+                            pdf_hint = "research paper"
+                            chips = [
+                                {"label": "Summarize Paper",  "hint": "Summarize the key findings"},
+                                {"label": "Explain Method",   "hint": "Explain the methodology"},
+                                {"label": "Key Takeaways",    "hint": "What are the main conclusions?"},
+                                {"label": "Explain Terms",    "hint": "Define technical terms on screen"},
+                            ]
+                        else:
+                            pdf_hint = "document"
+                            chips = [
+                                {"label": "Summarize Page",   "hint": "Summarize the visible page"},
+                                {"label": "Key Points",       "hint": "Extract the main points"},
+                                {"label": "Explain Concepts", "hint": "Explain difficult concepts"},
+                                {"label": "Ask Question",     "hint": "I have a question about this"},
+                            ]
+
                         app_suggestion = {
                             "type":        "pdf_suggestion",
-                            "reason":      "Reading a PDF document",
-                            "reason_long": "Cora can summarize pages or explain concepts.",
+                            "reason":      f"Reading {pdf_name}",
+                            "reason_long": f"You're reading a {pdf_hint}. Cora can summarize, explain concepts, or answer questions.",
+                            "confidence":  0.9,
+                            "suggestions": chips,
+                        }
+
+                    # ── PowerPoint ────────────────────────────────────────
+                    elif any(x in win_lower for x in ["powerpoint", ".pptx", " - ppt"]):
+                        import re as _re
+                        ppt_name = _re.sub(
+                            r'\s*[-—]\s*powerpoint.*$', '', current_window,
+                            flags=_re.IGNORECASE
+                        ).strip() or "your presentation"
+
+                        app_suggestion = {
+                            "type":        "presentation_suggestion",
+                            "reason":      f"Editing {ppt_name}",
+                            "reason_long": f"You're working on \"{ppt_name}\". Cora can improve slide content, suggest layouts, or summarize.",
                             "confidence":  0.9,
                             "suggestions": [
-                                {"label": "Summarize Page",   "hint": "Summarize the visible page"},
-                                {"label": "Explain Concepts", "hint": "Explain difficult parts"},
-                                {"label": "Key Points",       "hint": "Extract important ideas"},
+                                {"label": "Improve Slide",    "hint": "Improve the content of the current slide"},
+                                {"label": "Suggest Layout",   "hint": "Suggest a better layout for this slide"},
+                                {"label": "Summarize Deck",   "hint": "Summarize the presentation so far"},
+                                {"label": "Speaker Notes",    "hint": "Write speaker notes for this slide"},
                             ],
                         }
-                    elif is_browser and site_name:
-                        # Known site in browser — use site name
+
+                    # ── AI Chat tools ─────────────────────────────────────
+                    elif site_name.lower() in ("claude", "chatgpt", "perplexity", "gemini") \
+                            or win_lower.strip() in ("claude", "chatgpt", "perplexity"):
+                        ai_name = site_name or current_window.strip()
                         app_suggestion = {
-                            "type":        "browser_suggestion",
-                            "reason":      f"Browsing {site_name}",
-                            "reason_long": f"You're on {site_name}. Cora can summarize or explain page content.",
+                            "type":        "ai_suggestion",
+                            "reason":      f"Using {ai_name} chat",
+                            "reason_long": f"You're in {ai_name}. Cora can help you craft better prompts or suggest follow-up questions.",
+                            "confidence":  0.7,
+                            "suggestions": [
+                                {"label": "Improve Prompt",   "hint": "Help me write a better prompt for this"},
+                                {"label": "Follow-up Ideas",  "hint": "Suggest follow-up questions to ask"},
+                                {"label": "Summarize Chat",   "hint": "Summarize the current conversation"},
+                                {"label": "Explain Response", "hint": "Explain the AI's last response simply"},
+                            ],
+                        }
+
+                    # ── VS Code / developer ───────────────────────────────
+                    elif mode_primary == "developer" and not snapshot.get("error"):
+                        import re as _re
+                        # Extract filename from VS Code title
+                        file_match = _re.search(r'[-—]\s*(\S+\.\w+)', current_window)
+                        fname = file_match.group(1) if file_match else "your code"
+
+                        app_suggestion = {
+                            "type":        "developer_suggestion",
+                            "reason":      f"Coding in {fname}",
+                            "reason_long": f"You're editing \"{fname}\". Cora can review code, explain functions, or suggest improvements.",
                             "confidence":  0.75,
                             "suggestions": [
-                                {"label": "Summarize Page", "hint": f"Summarize the {site_name} page"},
-                                {"label": "Key Ideas",      "hint": "Extract key ideas from this page"},
-                                {"label": "Explain",        "hint": "Explain the page content"},
+                                {"label": "Review Code",      "hint": f"Review the visible code in {fname}"},
+                                {"label": "Explain Function", "hint": "Explain what this code does"},
+                                {"label": "Suggest Fix",      "hint": "Suggest improvements or optimizations"},
+                                {"label": "Add Comments",     "hint": "Write docstrings and comments for this code"},
                             ],
                         }
-                    elif is_browser:
-                        # Unknown site — generic browser
+
+                    # ── Known browser site ────────────────────────────────
+                    elif is_browser and site_name:
+                        # Page title gives us the actual article/page name
+                        display = page_title or site_name
                         app_suggestion = {
                             "type":        "browser_suggestion",
-                            "reason":      "Browsing the web",
+                            "reason":      f"Reading on {site_name}",
+                            "reason_long": f"You're reading \"{display}\" on {site_name}. Cora can summarize, explain, or answer questions.",
+                            "confidence":  0.75,
+                            "suggestions": [
+                                {"label": "Summarize Page",   "hint": f"Summarize \"{display}\""},
+                                {"label": "Key Points",       "hint": "Extract the main points"},
+                                {"label": "Explain Simply",   "hint": "Explain this page in simple terms"},
+                                {"label": "Ask Question",     "hint": "I have a question about this page"},
+                            ],
+                        }
+
+                    # ── Generic browser ───────────────────────────────────
+                    elif is_browser:
+                        display = page_title or current_window
+                        app_suggestion = {
+                            "type":        "browser_suggestion",
+                            "reason":      f"Browsing: {display[:40]}" if display else "Browsing the web",
                             "reason_long": "Cora can summarize or explain the current page.",
                             "confidence":  0.65,
                             "suggestions": [
-                                {"label": "Summarize Page", "hint": "Summarize this web page"},
-                                {"label": "Key Ideas",      "hint": "Extract key ideas"},
+                                {"label": "Summarize Page",   "hint": "Summarize this web page"},
+                                {"label": "Key Ideas",        "hint": "Extract key ideas from this page"},
+                                {"label": "Explain",          "hint": "Explain this page content simply"},
                             ],
                         }
 
