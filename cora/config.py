@@ -15,14 +15,6 @@ PROACTIVE_THRESHOLD = 0.35  # Min confidence to show overlay suggestion
 WRITING_THRESHOLD   = 0.35  # Lower threshold for document/writing mode
 
 # ─────────────────────────────────────────────────────────────────────────────
-# OpenRouter Settings
-# ─────────────────────────────────────────────────────────────────────────────
-USE_OPENROUTER      = False
-OPENROUTER_API_KEY  = "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"
-OPENROUTER_MODEL    = "google/gemini-2.0-flash-thinking-exp:free"
-OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
-
-# ─────────────────────────────────────────────────────────────────────────────
 # SYSTEM_PROMPT  — General proactive observer (fallback for unclassified windows)
 # ─────────────────────────────────────────────────────────────────────────────
 SYSTEM_PROMPT = """
