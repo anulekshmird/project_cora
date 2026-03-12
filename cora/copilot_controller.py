@@ -1,93 +1,109 @@
-
 import time
 import json
 import os
+import hashlib
+import re
 from PyQt6.QtCore import QThread, pyqtSignal
 
 import config
 
+
 class CopilotController(QThread):
+    hide_bubble_signal = pyqtSignal()  # ← cross-thread safe UI call
+
     def __init__(self, context_engine, observer, overlay):
         super().__init__()
         self.context_engine = context_engine
-        self.observer = observer
-        self.overlay = overlay
-        self.running = False
-        self.last_error_signature = None
-        self.last_visual_sig = None
-        self.loop_count = 0
-        self.last_llm_call_time = 0
-        
-        # Intelligent Dismiss State
-        self.dismissed_signatures = set()
-        self.snoozed_until = 0.0
+        self.observer       = observer
+        self.overlay        = overlay
+        self.running        = False
+        self.paused         = False
 
-        # Connect UI Signals
+        self.last_error_signature  = None
+        self.last_visual_sig       = None
+        self.loop_count            = 0
+        self.last_llm_call_time    = 0
+
+        self.dismissed_signatures  = set()
+        self.snoozed_until         = 0.0
+
         self.overlay.dismissed.connect(self.on_user_dismissed)
         self.overlay.snoozed.connect(self.on_user_snoozed)
-        
-        # State Tracking
-        self.last_active_window = None
-        self.last_writing_check_time = 0
-        
-        # Proactive context storage (for grounded suggestion execution)
-        self.last_proactive_context = None
+        self.hide_bubble_signal.connect(self.overlay.hide_bubble)
 
+        self.last_active_window      = None
+        self.last_writing_check_time = 0
+        self.last_doc_check_time     = 0
+
+        self.last_proactive_context  = None
+        self.last_ocr_text_cache     = ""
+        self.last_screen_hash        = None
+
+        self.last_switch_time        = time.time()
+        self.window_focus_start      = time.time()
+        self.presence_message_shown  = False
+        self.last_error_time         = 0.0
+
+        self.last_suggestion_time    = time.time()
+        self.last_presence_time      = 0.0
+        self.last_suggestion_sig     = None
+        self.analysis_cooldown       = 0
+
+    # ------------------------------------------------------------------
+    # User interaction callbacks
+    # ------------------------------------------------------------------
 
     def on_user_dismissed(self):
-        # Add current error/visual sig to dismissed
         if self.last_error_signature:
             self.dismissed_signatures.add(self.last_error_signature)
-            print(f"Copilot: Dismissed error signature: {self.last_error_signature}")
-        
         if self.last_visual_sig:
             self.dismissed_signatures.add(self.last_visual_sig)
+        # Always clear picked context on dismiss so next window gets fresh suggestions
+        if (self.last_proactive_context and
+                self.last_proactive_context.get('screen_context') and
+                self.last_suggestion_sig and
+                'picked' in str(self.last_suggestion_sig)):
+            print("Copilot: Picked context cleared on dismiss.")
+            self.last_proactive_context = None
+            self.last_suggestion_sig    = None
 
     def on_user_snoozed(self, mins):
         self.snoozed_until = time.time() + (mins * 60)
         print(f"Copilot: Snoozed for {mins} minutes.")
 
-    # ... (Start loop remains same) ...
-
-    def process_visual_payload(self, payload):
-        reason = payload.get('reason', '')
-        confidence = payload.get('confidence', 0.0)
-        
-        # Filters
-        if "Cora" in reason or "AI" in reason: return
-        if confidence < config.PROACTIVE_THRESHOLD: return
-        
-        # Deduplication (Strict)
-        sig = f"{reason}:{payload.get('suggestions', [])}"
-        
-        # Check Dismissed
-        if sig in self.dismissed_signatures:
-             return
-
-        if sig != self.last_visual_sig:
-             self.last_visual_sig = sig
-             # Emit only if new
-             self.observer.signals.suggestion_ready.emit(payload)
-
     def pause(self):
         self.paused = True
+        self.hide_bubble_signal.emit()  # hide bubble when chat opens
         print("Copilot Controller: Paused.")
 
     def resume(self):
         self.paused = False
+        self.last_suggestion_sig    = None
+        self.last_visual_sig        = None
+        self.last_active_window     = None
+        self.presence_message_shown = False
+        self.dismissed_signatures.clear()
+        self.context_engine._snapshot_cache = None
+        # Also clear any stale picked context
+        if (self.last_proactive_context and
+                self.last_proactive_context.get('type') == 'picked_suggestion'):
+            self.last_proactive_context = None
         print("Copilot Controller: Resumed.")
 
     def run(self):
         self.start_proactive_loop()
 
+    # ------------------------------------------------------------------
+    # Main proactive loop
+    # ------------------------------------------------------------------
+
     def start_proactive_loop(self):
         self.running = True
-        self.paused = False
+        self.paused  = False
         print("Copilot Controller: Proactive Loop Started.")
-        
+
         while self.running:
             try:
-                # 0. Check Pause and Snooze
                 if self.paused:
                     time.sleep(0.5)
                     continue
@@ -96,270 +112,694 @@ class CopilotController(QThread):
                     time.sleep(2)
                     continue
 
-                # 1. Get OS/Context Snapshot
-                snapshot = self.context_engine.get_context_snapshot()
+                # ── Snapshot ──────────────────────────────────────────
+                snapshot       = self.context_engine.get_context_snapshot()
                 current_window = snapshot.get('window_title', '')
-                current_mode = snapshot.get('mode', 'unknown') # Backwards compat
-                mode_primary = snapshot.get('mode_primary', current_mode)
+                win_lower      = current_window.lower()
+                cw_lower       = win_lower  # alias used in dialog detection
+                mode_primary   = snapshot.get('mode_primary', 'general')
                 mode_secondary = snapshot.get('mode_secondary', 'unknown')
-                
-                # FIX 2: Skip Cora's own UI (internal mode)
+                page_title     = snapshot.get('page_title', '')   # e.g. "BLIND FOOD CHALLENGE"
+                site_name      = snapshot.get('site_name', '')    # e.g. "YouTube"
+                browser_name   = snapshot.get('browser_name', '') # e.g. "Google Chrome"
+                idle_time      = self.context_engine.get_idle_time()
+
+                if self.loop_count % 5 == 0:
+                    print(f"Copilot Pulse: Mode=[{mode_primary}/{mode_secondary}] "
+                          f"Idle=[{idle_time:.1f}s] Window=[{current_window}]")
+
+                # ── Internal / system guard ───────────────────────────
                 if mode_primary == "internal":
-                    time.sleep(0.2)
-                    continue
-                
-                # Skip Cora suggestion window (not internal, but nothing to analyze)
-                cw_lower = (current_window or "").lower()
-                if "cora suggestion" in cw_lower:
                     time.sleep(0.5)
                     continue
-                
-                idle_time = self.context_engine.get_idle_time()
-                
-                # DEBUG: Pulse Check
-                if self.loop_count % 3 == 0:
-                    print(f"Copilot Pulse: Mode=[{mode_primary}/{mode_secondary}] Idle=[{idle_time:.1f}s] Window=[{current_window}]")
 
-                # ---------------------------------------------------------
-                # A. APP SWITCH PRESENCE MODE
-                # ---------------------------------------------------------
-                if current_window != self.last_active_window:
-                    print(f"Copilot: 🔄 App Switch Detected -> {current_window}")
-                    self.last_active_window = current_window
-                    
-                    # Skip reset if switching TO Cora's own windows
-                    cw_lower = current_window.lower() if current_window else ""
-                    if cw_lower in ["cora ai", "cora suggestion"]:
-                        time.sleep(0.5)
-                        continue
-                    
-                    # Reset visual suggestion state for new window
-                    self.observer.signals.error_resolved.emit() # Collapse to idle orb
-                    self.last_visual_sig = None
-                    # NOTE: Do NOT reset last_error_signature here.
-                    # The error signature includes the code text, so it will
-                    # naturally update when the user actually fixes the code.
-                    # Resetting it here causes re-triggering on every app switch.
-                    
-                    # Short grace period to let UI settle
-                    time.sleep(1.0) 
+                cw_lower = (current_window or "").lower()
+                # Skip if active window is CORA's own UI
+                if any(kw in cw_lower for kw in [
+                    "cora suggestion", "cora ai", "cora assistant"
+                ]):
+                    time.sleep(0.5)
                     continue
 
-                # ---------------------------------------------------------
-                # B. PRIORITY: Check for Errors (Syntax/Runtime)
-                # ---------------------------------------------------------
+                if not current_window.strip() or current_window.strip() in ("", "Window"):
+                    time.sleep(0.5)
+                    continue
+
+                # Skip dialog boxes, popups, and system notifications
+                dialog_keywords = [
+                    "sorry,", "error", "warning", "alert", "dialog",
+                    "not found", "cannot", "could not", "failed",
+                    "do you want", "are you sure", "confirm",
+                    "microsoft word - ", "application error",
+                ]
+                if any(kw in cw_lower for kw in dialog_keywords) and len(current_window) < 80:
+                    time.sleep(0.5)
+                    continue
+
+                # ── Clear stale error state ───────────────────────────
+                if not snapshot.get("error") and self.last_error_signature:
+                    print("Copilot: Error resolved, clearing state.")
+                    self.last_error_signature = None
+                    self.last_visual_sig      = None
+                    self.dismissed_signatures.clear()
+
+                # ── Window switch — clear stale suggestion ────────────
+                if current_window != self.last_active_window:
+                    cora_own = any(kw in current_window.lower() for kw in [
+                        "cora suggestion", "cora ai", "cora assistant"
+                    ])
+                    if cora_own:
+                        time.sleep(0.3)
+                        continue
+                    print(f"Copilot: Window changed → {current_window[:60]}")
+                    self.last_active_window     = current_window
+                    self.last_switch_time       = time.time()
+                    self.last_suggestion_sig    = None
+                    self.last_visual_sig        = None
+                    self.presence_message_shown = False
+                    self.dismissed_signatures.clear()
+                    self.hide_bubble_signal.emit()
+
+                    # Always clear picked context on window switch
+                    if self.last_proactive_context:
+                        picked_window = self.last_proactive_context.get('picked_at_window', '')
+                        if picked_window and picked_window != current_window:
+                            print("Copilot: Cleared stale picked context on window switch.")
+                            self.last_proactive_context = None
+                        elif self.last_proactive_context.get('type') == 'picked_suggestion':
+                            self.last_proactive_context = None
+
+                    time.sleep(0.3)
+                    continue
+
+                # ── OCR change detection ──────────────────────────────
+                current_ocr  = getattr(self.observer, 'last_ocr_text', '')
+                current_hash = hashlib.md5(current_ocr.encode()).hexdigest() if current_ocr else None
+                if current_hash != self.last_ocr_text_cache:
+                    print("Copilot: Context change detected.")
+                    self.dismissed_signatures.clear()
+                    self.last_ocr_text_cache = current_hash
+
+                # ── Idle threshold — relax for video/youtube ──────────
+                idle_required = 0.3 if mode_primary in ('video', 'youtube') else 0.8
+                if idle_time < idle_required:
+                    time.sleep(0.2)
+                    continue
+
+                time_since_switch          = time.time() - self.last_switch_time
+                time_since_last_suggestion = time.time() - self.last_suggestion_time
+                suggestion_triggered       = False
+
+                # ── Classify window ───────────────────────────────────
+
+                is_youtube = (
+                    "youtube" in win_lower
+                    or site_name.lower() == "youtube"
+                )
+
+                is_word = (
+                    not is_youtube and (
+                        "microsoft word" in win_lower
+                        or win_lower.endswith(".docx")
+                        or " - word" in win_lower
+                        or "word - " in win_lower
+                        or ("compatibility mode" in win_lower and "word" in win_lower)
+                    )
+                )
+
+                is_excel = (
+                    not is_youtube and (
+                        "microsoft excel" in win_lower
+                        or win_lower.endswith(".xlsx")
+                        or " - excel" in win_lower
+                    )
+                )
+
+                is_pdf = (
+                    not is_youtube and (
+                        win_lower.endswith(".pdf")
+                        or "adobe acrobat" in win_lower
+                        or "foxit" in win_lower
+                        or "pdf reader" in win_lower
+                    )
+                )
+
+                # is_browser must always be defined last — depends on above variables
+                is_browser = (
+                    (
+                        any(x in win_lower for x in [
+                            "- google chrome", "- mozilla firefox",
+                            "- microsoft edge", "- brave", "- opera"
+                        ])
+                        or win_lower.strip() in ("claude", "chatgpt", "perplexity")
+                        or (site_name.lower() in (
+                            "claude", "chatgpt", "openrouter",
+                            "perplexity", "gemini", "google"
+                        ) and not is_youtube)
+                    )
+                    and not is_youtube
+                    and not is_word
+                    and not is_excel
+                    and not is_pdf
+                    and site_name.lower() not in ("youtube", "netflix", "twitch")
+                )
+
+                # ── P1: Error suggestions ─────────────────────────────
                 if snapshot.get("error"):
                     err_sig = snapshot.get("error_signature")
-                    
-                    # Only trigger if this is a NEW error signature
-                    if err_sig != self.last_error_signature:
-                        self.last_error_signature = err_sig
-                        
-                        # Check if this specific error was dismissed
-                        if err_sig in self.dismissed_signatures:
-                            print(f"Copilot: Skipping dismissed error: {err_sig}")
-                        else:
+                    if (err_sig != self.last_error_signature
+                            and err_sig not in self.dismissed_signatures):
+                        if time.time() - self.last_error_time > 2.0:
+                            self.last_error_time = time.time()
                             self.handle_new_error(snapshot)
-                
-                # ---------------------------------------------------------
-                # C. WRITING MODE (Productivity Suggestion Mode)
-                # ---------------------------------------------------------
-                elif mode_primary == 'writing':
-                    # Ensure we don't stick in "error" state from previous mode
-                    if self.last_error_signature:
-                         print("Copilot: Mode switched to WRITING. Clearing error state.")
-                         self.observer.signals.error_resolved.emit()
-                         self.last_error_signature = None
-                         self.dismissed_signatures.clear() # Optional: clear dismissed history for fresh start
+                            suggestion_triggered = True
 
-                    if idle_time > 1.5:
-                        # IDLE: Check for suggestions
-                        if time.time() - self.last_writing_check_time > 3.0: # Check more frequently (every 3s vs 5s)
-                             self.handle_writing_assistance(snapshot)
-                             self.last_writing_check_time = time.time()
+                # ── P2: YouTube — use real title ──────────────────────
+                if not suggestion_triggered and is_youtube:
+                    # Strip notification badge e.g. "(85) Title - YouTube - Google Chrome"
+                    raw = re.sub(r'^\(\d+\)\s*', '', current_window).strip()
+                    parts = re.split(r'\s*[-—|]\s*', raw)
+                    skip  = {
+                        "youtube", "google chrome", "mozilla firefox",
+                        "microsoft edge", "brave", "opera", "safari",
+                        browser_name.lower(),
+                    }
+                    page_parts  = [p.strip() for p in parts
+                                   if p.strip() and p.strip().lower() not in skip]
+                    clean_title = page_title or (page_parts[0] if page_parts else "")
+
+                    # Determine if on homepage vs actual video
+                    on_homepage   = not clean_title or clean_title.lower() in (
+                        "youtube", "new tab", "untitled"
+                    )
+                    display_title = clean_title if not on_homepage else ""
+
+                    if on_homepage:
+                        reason      = "Browsing YouTube feed"
+                        reason_long = "You're on the YouTube homepage. Open a video for specific suggestions."
+                        confidence  = 0.6
+                        suggestions = [
+                            {"label": "Recommend Video", "hint": "Suggest something interesting to watch"},
+                            {"label": "Ask Anything",    "hint": "Ask me anything"},
+                        ]
                     else:
-                        # ACTIVE: User is typing
-                        # If we have a lingering suggestion, clear it explicitly
-                        if self.last_visual_sig is not None:
-                             print("Copilot: ⌨️ User resumed typing. Claring suggestion.")
-                             self.observer.signals.error_resolved.emit()
-                             self.last_visual_sig = None
+                        reason      = f"Watching {display_title}"
+                        reason_long = (f"You're watching \"{display_title}\" on YouTube. "
+                                       "Cora can explain the topic, extract key points, or answer questions.")
+                        confidence  = 0.85
+                        suggestions = [
+                            {"label": "Explain Topic", "hint": f"Explain the topic of {display_title}"},
+                            {"label": "Key Points",    "hint": f"Main points of {display_title}?"},
+                            {"label": "Related Facts", "hint": f"Interesting facts about {display_title}"},
+                            {"label": "Ask Question",  "hint": f"I have a question about {display_title}"},
+                        ]
 
-                # ---------------------------------------------------------
-                # D. READING MODE (PDF/E-Book Mode)
-                # ---------------------------------------------------------
-                elif mode_primary == 'reading':
-                    # Similar to Writing, but focused on summaries/explanation
-                    # Clear errors
-                    if self.last_error_signature:
-                         self.observer.signals.error_resolved.emit()
-                         self.last_error_signature = None
-                    
-                    if idle_time > 2.0: # Slightly longer pause for reading
-                        # Check less frequently to avoid spamming while user reads
-                         if time.time() - self.last_writing_check_time > 10.0: 
-                             self.handle_reading_assistance(snapshot)
-                             self.last_writing_check_time = time.time()
+                    app_suggestion = {
+                        "type":         "youtube_suggestion",
+                        "reason":       reason,
+                        "reason_long":  reason_long,
+                        "confidence":   confidence,
+                        "suggestions":  suggestions,
+                        "screen_context": current_ocr,
+                        "page_title":   display_title,
+                        "site_name":    "YouTube",
+                        "window_title": current_window,
+                    }
 
-                # ---------------------------------------------------------
-                # ---------------------------------------------------------
-                # E. FALLBACK: Visual / Maintenance
-                # ---------------------------------------------------------
-                else:
-                    # No error found currently.
-                    
-                    # CRITICAL FIX 3: Conservative Hiding
-                    should_hide = False
-                    if mode_primary == 'developer':
-                        should_hide = True # We are in code, but no error found -> Fixed!
-                    elif mode_primary == 'general':
-                        should_hide = True # Switched context completely
-                    
-                    if not should_hide:
-                        pass # Maintain state
-                        
-                    # Check if we just resolved an error
-                    elif self.last_error_signature:
-                        print(f"Copilot: Resolving error. Mode={mode_primary} Title='{current_window}'")
-                        self.last_error_signature = None
-                        self.dismissed_signatures.clear()
-                        self.last_visual_sig = None
-                        self.handle_resolution()
-                    
-                    # Visual Fallback (Only if NOT writing mode, to avoid conflict)
-                    # Use Secondary Mode to allow Browser checks but block productive writing
-                    elif mode_primary not in ['writing', 'reading']:
-                        self.handle_visual_fallback(snapshot)
+                    sig = f"youtube:{display_title or 'home'}"
+                    time_since_last = time.time() - self.last_suggestion_time
+                    if (sig not in self.dismissed_signatures 
+                            and sig != self.last_suggestion_sig
+                            and time_since_last > 15.0):
+                        self._store_proactive_context(
+                            snapshot, mode_primary, current_window,
+                            reason, current_ocr,
+                            page_title=display_title, site_name="YouTube"
+                        )
+                        self.last_suggestion_sig  = sig
+                        self.last_suggestion_time = time.time()
+                        self.observer.signals.suggestion_ready.emit(app_suggestion)
+                        suggestion_triggered = True
 
-                # Loop Frequency (Faster: 0.1s for immediate reaction)
-                time.sleep(0.1)
+                # ── P3: App-specific context-aware suggestions ────────
+                if not suggestion_triggered:
+                    app_suggestion = None
+
+                    # ── Word ──────────────────────────────────────────────
+                    if is_word:
+                        # Extract document name from window title
+                        doc_name = re.sub(
+                            r'\s*[-—]\s*(compatibility mode\s*)?[-—]?\s*word.*$', '',
+                            current_window, flags=re.IGNORECASE
+                        ).strip() or "your document"
+
+                        # Use OCR to detect what section they're in
+                        ocr_lower = current_ocr.lower()
+                        if any(x in ocr_lower for x in ["introduction", "abstract", "objective"]):
+                            edit_hint = "introduction or abstract section"
+                        elif any(x in ocr_lower for x in ["conclusion", "summary", "result"]):
+                            edit_hint = "conclusion or results section"
+                        elif any(x in ocr_lower for x in ["acknowledgement", "thank", "grateful"]):
+                            edit_hint = "acknowledgement section"
+                        elif any(x in ocr_lower for x in ["reference", "bibliography", "citation"]):
+                            edit_hint = "references section"
+                        else:
+                            edit_hint = "document"
+
+                        app_suggestion = {
+                            "type":        "writing_suggestion",
+                            "reason":      f"Editing {doc_name}",
+                            "reason_long": f"You're working on the {edit_hint} of \"{doc_name}\". Cora can improve grammar, rewrite sections, or summarize.",
+                            "confidence":  0.9,
+                            "suggestions": [
+                                {"label": "Improve Grammar", "hint": f"Fix grammar and clarity in the {edit_hint}"},
+                                {"label": "Rewrite Section", "hint": f"Rewrite the {edit_hint} more clearly"},
+                                {"label": "Summarize",       "hint": f"Summarize the {edit_hint}"},
+                                {"label": "Key Points",      "hint": "Extract the main ideas from this section"},
+                            ],
+                        }
+
+                    # ── Excel ─────────────────────────────────────────────
+                    elif is_excel:
+                        file_name = re.sub(
+                            r'\s*[-—]\s*excel.*$', '', current_window,
+                            flags=re.IGNORECASE
+                        ).strip() or "your spreadsheet"
+
+                        ocr_lower = current_ocr.lower()
+                        if any(x in ocr_lower for x in ["sum", "average", "count", "=if", "=vlookup"]):
+                            excel_hint = "formula or calculation"
+                            chips = [
+                                {"label": "Explain Formula",  "hint": "Explain what this formula does"},
+                                {"label": "Fix Formula",      "hint": "Check and fix any formula errors"},
+                                {"label": "Optimize",         "hint": "Suggest a better formula"},
+                                {"label": "How It Works",     "hint": "Walk me through this formula step by step"},
+                            ]
+                        elif any(x in ocr_lower for x in ["total", "revenue", "expense", "budget", "profit"]):
+                            excel_hint = "financial data"
+                            chips = [
+                                {"label": "Analyze Trends",   "hint": "Identify trends in this financial data"},
+                                {"label": "Summarize Data",   "hint": "Summarize the key figures"},
+                                {"label": "Suggest Chart",    "hint": "What chart type best shows this data?"},
+                                {"label": "Find Anomalies",   "hint": "Are there any unusual values?"},
+                            ]
+                        else:
+                            excel_hint = "spreadsheet data"
+                            chips = [
+                                {"label": "Analyze Data",     "hint": "Find patterns or insights in this data"},
+                                {"label": "Explain Formula",  "hint": "Explain any formulas on screen"},
+                                {"label": "Suggest Chart",    "hint": "What visualization fits this data?"},
+                                {"label": "Summarize",        "hint": "Give me a summary of this spreadsheet"},
+                            ]
+
+                        app_suggestion = {
+                            "type":        "spreadsheet_suggestion",
+                            "reason":      f"Working on {file_name}",
+                            "reason_long": f"You're editing {excel_hint} in \"{file_name}\". Cora can explain formulas, analyze data, or suggest visualizations.",
+                            "confidence":  0.9,
+                            "suggestions": chips,
+                        }
+
+                    # ── PDF ───────────────────────────────────────────────
+                    elif is_pdf:
+                        pdf_name = re.sub(
+                            r'\s*[-—]\s*(adobe acrobat|foxit|pdf).*$', '',
+                            current_window, flags=re.IGNORECASE
+                        ).strip() or "this PDF"
+
+                        ocr_lower = current_ocr.lower()
+                        if any(x in ocr_lower for x in ["clause", "agreement", "party", "hereby", "whereas"]):
+                            pdf_hint = "legal document"
+                            chips = [
+                                {"label": "Explain Clause",   "hint": "Explain this clause in plain English"},
+                                {"label": "Key Terms",        "hint": "What are the important terms?"},
+                                {"label": "Summarize",        "hint": "Summarize the visible section"},
+                                {"label": "Red Flags",        "hint": "Are there any concerning clauses?"},
+                            ]
+                        elif any(x in ocr_lower for x in ["abstract", "methodology", "hypothesis", "figure"]):
+                            pdf_hint = "research paper"
+                            chips = [
+                                {"label": "Summarize Paper",  "hint": "Summarize the key findings"},
+                                {"label": "Explain Method",   "hint": "Explain the methodology"},
+                                {"label": "Key Takeaways",    "hint": "What are the main conclusions?"},
+                                {"label": "Explain Terms",    "hint": "Define technical terms on screen"},
+                            ]
+                        else:
+                            pdf_hint = "document"
+                            chips = [
+                                {"label": "Summarize Page",   "hint": "Summarize the visible page"},
+                                {"label": "Key Points",       "hint": "Extract the main points"},
+                                {"label": "Explain Concepts", "hint": "Explain difficult concepts"},
+                                {"label": "Ask Question",     "hint": "I have a question about this"},
+                            ]
+
+                        app_suggestion = {
+                            "type":        "pdf_suggestion",
+                            "reason":      f"Reading {pdf_name}",
+                            "reason_long": f"You're reading a {pdf_hint}. Cora can summarize, explain concepts, or answer questions.",
+                            "confidence":  0.9,
+                            "suggestions": chips,
+                        }
+
+                    # ── PowerPoint ────────────────────────────────────────
+                    elif any(x in win_lower for x in ["powerpoint", ".pptx", " - ppt"]):
+                        ppt_name = re.sub(
+                            r'\s*[-—]\s*powerpoint.*$', '', current_window,
+                            flags=re.IGNORECASE
+                        ).strip() or "your presentation"
+
+                        app_suggestion = {
+                            "type":        "presentation_suggestion",
+                            "reason":      f"Editing {ppt_name}",
+                            "reason_long": f"You're working on \"{ppt_name}\". Cora can improve slide content, suggest layouts, or summarize.",
+                            "confidence":  0.9,
+                            "suggestions": [
+                                {"label": "Improve Slide",    "hint": "Improve the content of the current slide"},
+                                {"label": "Suggest Layout",   "hint": "Suggest a better layout for this slide"},
+                                {"label": "Summarize Deck",   "hint": "Summarize the presentation so far"},
+                                {"label": "Speaker Notes",    "hint": "Write speaker notes for this slide"},
+                            ],
+                        }
+
+                    # ── AI Chat tools ─────────────────────────────────────
+                    elif site_name.lower() in ("claude", "chatgpt", "perplexity", "gemini") \
+                            or win_lower.strip() in ("claude", "chatgpt", "perplexity"):
+                        ai_name = site_name or current_window.strip()
+                        app_suggestion = {
+                            "type":        "ai_suggestion",
+                            "reason":      f"Using {ai_name} chat",
+                            "reason_long": f"You're in {ai_name}. Cora can help you craft better prompts or suggest follow-up questions.",
+                            "confidence":  0.7,
+                            "suggestions": [
+                                {"label": "Improve Prompt",   "hint": "Help me write a better prompt for this"},
+                                {"label": "Follow-up Ideas",  "hint": "Suggest follow-up questions to ask"},
+                                {"label": "Summarize Chat",   "hint": "Summarize the current conversation"},
+                                {"label": "Explain Response", "hint": "Explain the AI's last response simply"},
+                            ],
+                        }
+
+                    # ── VS Code / developer ───────────────────────────────
+                    elif mode_primary == "developer" and not snapshot.get("error"):
+                        # Check if it's a browser-based dev tool (GitHub, StackOverflow)
+                        is_browser_dev = any(x in win_lower for x in [
+                            "- google chrome", "- mozilla firefox",
+                            "- microsoft edge", "- brave"
+                        ])
+                        file_match = re.search(r'[-—]\s*(\S+\.\w+)', current_window)
+                        fname = file_match.group(1) if file_match else "your code"
+
+                        if is_browser_dev and site_name:
+                            # GitHub, StackOverflow etc in browser
+                            display = page_title or site_name
+                            app_suggestion = {
+                                "type":        "developer_suggestion",
+                                "reason":      f"Browsing {site_name}: {display[:40]}" if display else f"Browsing {site_name}",
+                                "reason_long": f"You're on {site_name}. Cora can explain code, answer questions, or summarize.",
+                                "confidence":  0.8,
+                                "suggestions": [
+                                    {"label": "Explain Code",    "hint": f"Explain the code shown on this {site_name} page"},
+                                    {"label": "Summarize Repo",  "hint": f"Summarize what this repository does"},
+                                    {"label": "Key Changes",     "hint": "What are the key changes in this commit/PR?"},
+                                    {"label": "Ask Question",    "hint": f"I have a question about this {site_name} page"},
+                                ],
+                            }
+                        else:
+                            app_suggestion = {
+                                "type":        "developer_suggestion",
+                                "reason":      f"Coding in {fname}",
+                                "reason_long": f"You're editing \"{fname}\". Cora can review code, explain functions, or suggest improvements.",
+                                "confidence":  0.75,
+                                "suggestions": [
+                                    {"label": "Review Code",      "hint": f"Review the visible code in {fname}"},
+                                    {"label": "Explain Function", "hint": "Explain what this code does"},
+                                    {"label": "Suggest Fix",      "hint": "Suggest improvements or optimizations"},
+                                    {"label": "Add Comments",     "hint": "Write docstrings and comments for this code"},
+                                ],
+                            }
+
+                    # ── Messaging apps ────────────────────────────────────
+                    elif any(x in win_lower for x in [
+                        "whatsapp", "telegram", "signal", "discord", "slack", "teams"
+                    ]):
+                        app_name = next((x.title() for x in [
+                            "whatsapp", "telegram", "signal", "discord", "slack", "teams"
+                        ] if x in win_lower), "Messaging")
+
+                        app_suggestion = {
+                            "type":        "browser_suggestion",
+                            "reason":      f"Using {app_name}",
+                            "reason_long": f"You're in {app_name}. Cora can help draft replies, summarize conversations, or suggest responses.",
+                            "confidence":  0.75,
+                            "suggestions": [
+                                {"label": "Draft Reply",    "hint": f"Help me write a reply in {app_name}"},
+                                {"label": "Summarize Chat", "hint": "Summarize the visible conversation"},
+                                {"label": "Improve Message","hint": "Make my message clearer and more polite"},
+                                {"label": "Translate",      "hint": "Translate the visible message"},
+                            ],
+                        }
+
+                    # ── Generic browser ───────────────────────────────────
+                    elif is_browser:
+                        # Use page_title for specific page content, fall back to window title
+                        display = page_title or site_name or current_window
+                        # Strip browser suffix from display
+                        display = re.sub(
+                            r'\s*[-—]\s*(google chrome|mozilla firefox|microsoft edge|brave|opera).*$',
+                            '', display, flags=re.IGNORECASE
+                        ).strip()
+
+                        app_suggestion = {
+                            "type":        "browser_suggestion",
+                            "reason":      f"Reading: {display[:50]}" if display else "Browsing the web",
+                            "reason_long": f"You're viewing \"{display}\". Cora can summarize, explain, or answer questions about this page.",
+                            "confidence":  0.7,
+                            "suggestions": [
+                                {"label": "Summarize Page",  "hint": f"Summarize the content of: {display}"},
+                                {"label": "Key Ideas",       "hint": f"Extract the key ideas from: {display}"},
+                                {"label": "Explain Simply",  "hint": f"Explain this page in simple terms: {display}"},
+                                {"label": "Ask Question",    "hint": f"I have a question about: {display}"},
+                            ],
+                        }
+
+                    if app_suggestion:
+                        sig = f"{app_suggestion['reason']}:{current_window}"
+                        time_since_last = time.time() - self.last_suggestion_time
+                        if (sig not in self.dismissed_signatures 
+                                and sig != self.last_suggestion_sig
+                                and time_since_last > 15.0):
+                            app_suggestion["screen_context"] = current_ocr
+                            app_suggestion["window_title"]   = current_window
+                            app_suggestion["page_title"]     = page_title
+                            app_suggestion["site_name"]      = site_name
+                            self._store_proactive_context(
+                                snapshot, mode_primary, current_window,
+                                app_suggestion['reason'], current_ocr,
+                                page_title=page_title, site_name=site_name
+                            )
+                            self.last_suggestion_sig  = sig
+                            self.last_suggestion_time = time.time()
+                            self.observer.signals.suggestion_ready.emit(app_suggestion)
+                            suggestion_triggered = True
+
+                # ── P4: Writing / document LLM analysis ──────────────
+                # Skip if a static Word suggestion was already shown this window
+                if (not suggestion_triggered and mode_primary in ('writing', 'document')
+                        and not is_word and not is_excel and not is_pdf):
+                    if time.time() - self.last_writing_check_time > 3.0:
+                        self.handle_writing_assistance(snapshot)
+                        self.last_writing_check_time = time.time()
+                        suggestion_triggered = True
+
+                # ── P5: Visual fallback (general / reading) ───────────
+                if not suggestion_triggered and time_since_switch > 1.0:
+                    now = time.time()
+                    if now >= self.analysis_cooldown:
+                        ocr_hash = (hashlib.md5(current_ocr.encode()).hexdigest()
+                                    if current_ocr else "empty")
+                        if ocr_hash != getattr(self, 'last_screen_hash', None):
+                            self.last_screen_hash   = ocr_hash
+                            self.analysis_cooldown  = now + 1.0
+                            if mode_primary not in ('developer', 'internal', 'video', 'youtube'):
+                                self.handle_visual_fallback(snapshot)
+                                suggestion_triggered = True
+
+                # ── P6: Presence message ──────────────────────────────
+                if (not suggestion_triggered
+                        and time_since_last_suggestion > 45.0
+                        and mode_primary not in ('video', 'youtube', 'browser', 'internal')):
+                    if not self.presence_message_shown:
+                        self.presence_message_shown = True
+                        self.last_suggestion_time   = time.time()
+                        # Use signal to safely show from non-UI thread
+                        self.observer.signals.suggestion_ready.emit({
+                            "type":        "general",
+                            "reason":      "I'm here if you need help",
+                            "reason_long": "Ask me anything about what's on your screen.",
+                            "confidence":  0.5,
+                            "suggestions": [
+                                {"label": "Ask Anything",   "hint": "Ask me anything"},
+                                {"label": "What's on screen", "hint": "Describe what's on my screen"},
+                            ],
+                            "screen_context": current_ocr,
+                            "window_title":   current_window,
+                            "page_title":     page_title,
+                            "site_name":      site_name,
+                        })
+
+                # ── Clear developer error state if resolved ───────────
+                if (not snapshot.get("error")
+                        and mode_primary == 'developer'
+                        and self.last_error_signature):
+                    self.handle_resolution()
+                    self.last_error_signature = None
+
+                # ── Dynamic sleep ─────────────────────────────────────
+                freq_map = {
+                    "developer": 0.15,
+                    "writing":   0.4,
+                    "reading":   0.6,
+                    "general":   0.8,
+                    "chat":      1.0,
+                    "internal":  0.2,
+                }
+                time.sleep(freq_map.get(mode_primary, 1.0))
                 self.loop_count += 1
-                
+
             except Exception as e:
                 print(f"Copilot Loop Exception: {e}")
-                time.sleep(1) # Prevent busy loop on crash
+                time.sleep(1)
 
-    def stop(self):
-        self.running = False
-        self.wait()
+    # ------------------------------------------------------------------
+    # Helper: store proactive context with all fields overlay expects
+    # ------------------------------------------------------------------
 
-    def _build_error_payload(self, error, reason="", code="", payload_type="syntax_error"):
-        """Build a guaranteed-valid error payload with all required fields."""
-        return {
-            "type": payload_type,
-            "reason": reason or f"Error: {error.get('message', 'Unknown')}",
-            "code": code,
-            "suggestions": [{"label": "Fix Error", "hint": "Show corrected code"}],
-            "confidence": 1.0,
-            "screen_context": "",
-            "error_file": error.get('file', ''),
-            "error_line": error.get('line', ''),
-            "error_message": error.get('message', ''),
-            "error_context": error.get('context', '')
+    def _store_proactive_context(self, snapshot, mode_primary, window_title,
+                                  reason, ocr_text,
+                                  page_title="", site_name=""):
+        self.last_proactive_context = {
+            'mode_primary':  mode_primary,
+            'window_title':  window_title,
+            'page_title':    page_title,
+            'site_name':     site_name,
+            'reason':        reason,
+            'screen_context': ocr_text,   # full OCR — not truncated
+            'ocr_text':      ocr_text,
+            'screenshot':    getattr(self.observer, 'last_proactive_screenshot', None),
+            'error_file':    snapshot.get('error', {}).get('file',    '') if snapshot.get('error') else '',
+            'error_line':    snapshot.get('error', {}).get('line',    '') if snapshot.get('error') else '',
+            'error_message': snapshot.get('error', {}).get('message', '') if snapshot.get('error') else '',
+            'error_context': snapshot.get('error', {}).get('context', '') if snapshot.get('error') else '',
         }
 
+    # ------------------------------------------------------------------
+    # Error payload builder
+    # ------------------------------------------------------------------
+
+    def _build_error_payload(self, error, reason="", code="", payload_type="syntax_error"):
+        return {
+            "type":          payload_type,
+            "reason":        reason or f"Error: {error.get('message', 'Unknown')}",
+            "code":          code,
+            "suggestions":   [{"label": "Fix Error", "hint": "Show corrected code"}],
+            "confidence":    1.0,
+            "screen_context": "",
+            "error_file":    error.get('file', ''),
+            "error_line":    error.get('line', ''),
+            "error_message": error.get('message', ''),
+            "error_context": error.get('context', ''),
+        }
+
+    # ------------------------------------------------------------------
+    # Error handler
+    # ------------------------------------------------------------------
+
     def handle_new_error(self, snapshot):
+        if not snapshot.get("error"):
+            return
+
         error = snapshot['error']
         print(f"Copilot: 🚨 New Error Detected: {error['message']}")
-        
-        # PHASE 1: Immediate Visual Feedback (includes full error context)
+
         temp_payload = self._build_error_payload(
-            error, 
+            error,
             reason=f"Analyzing: {error['message']}...",
             code="# Fetching fix..."
         )
         self.observer.signals.suggestion_ready.emit(temp_payload)
-        
-        # Store proactive context for grounded suggestion execution
-        self.last_proactive_context = {
-            'mode_primary': snapshot.get('mode_primary', snapshot.get('mode', 'general')),
-            'window_title': snapshot.get('window_title', ''),
-            'reason': f"Error: {error.get('message', '')}",
-            'ocr_text': self.observer.last_ocr_text,
-            'screenshot': self.observer.last_proactive_screenshot,
-            'error_file': error.get('file', ''),
-            'error_line': error.get('line', ''),
+
+        self._store_proactive_context(
+            snapshot,
+            mode_primary  = snapshot.get('mode_primary', 'general'),
+            window_title  = snapshot.get('window_title', ''),
+            reason        = f"Error: {error.get('message', '')}",
+            ocr_text      = self.observer.last_ocr_text,
+        )
+        # Add error-specific fields
+        self.last_proactive_context.update({
+            'error_file':    error.get('file', ''),
+            'error_line':    error.get('line', ''),
             'error_message': error.get('message', ''),
             'error_context': error.get('context', ''),
-            'file_content': snapshot.get('file_content', ''),
-        }
-        
-        # Construct Prompt — JSON ONLY, no markdown
-        error_prompt = f"""You are a strict debugging assistant.
+            'file_content':  snapshot.get('file_content', ''),
+        })
 
-LANGUAGE: Python
+        error_prompt = (
+            f"You are a strict debugging assistant.\n\n"
+            f"LANGUAGE: Python\n\n"
+            f"ERROR:\n"
+            f"File: {error['file']}\n"
+            f"Line: {error['line']}\n"
+            f"Message: {error['message']}\n\n"
+            f"CODE:\n{error.get('context', '')}\n\n"
+            f"OUTPUT JSON ONLY:\n"
+            f'{{"reason": "short explanation", "code": "corrected code"}}'
+        )
 
-ERROR:
-File: {error['file']}
-Line: {error['line']}
-Message: {error['message']}
-
-CODE:
-{error.get('context', '')}
-
-TASK:
-1. Identify exact syntax mistake
-2. Provide corrected code
-3. Keep explanation MAX 1 sentence
-4. Do NOT give teaching paragraphs
-
-OUTPUT JSON ONLY:
-{{"reason": "short explanation", "code": "corrected code"}}"""
-
-        # DEBUG LOGGING
         print("--- DEBUG PROMPT START ---")
         print(f"Proactive Suggestion: Analyzing: {error['message']}...")
         print(f"Error Context: {error.get('context', '')}")
         print("--- DEBUG PROMPT END ---")
 
         try:
-            import ollama
-            
-            # Rate Limiting (≥1.5s between calls)
             now = time.time()
             if now - self.last_llm_call_time < 1.5:
                 print("Copilot: Rate limit hit. Skipping LLM call.")
                 return
-
             self.last_llm_call_time = now
+
+            from observer import _get_ollama
             print("Copilot: Asking LLM for error fix...")
-            response = ollama.chat(
+            response = _get_ollama().chat(
                 model=self.observer.model,
                 messages=[
                     {'role': 'system', 'content': config.DEV_SYSTEM_PROMPT},
-                    {'role': 'user', 'content': error_prompt}
+                    {'role': 'user',   'content': error_prompt},
                 ]
             )
             text = response['message']['content'].strip()
             print(f"Copilot: LLM Response (Raw): {text[:80]}...")
-            
-            # Parse JSON
+
             payload = self._clean_json(text)
             if payload:
-                # Merge with guaranteed structure
                 final = self._build_error_payload(
                     error,
                     reason=payload.get('reason', error['message']),
                     code=payload.get('code', '')
                 )
-                print(f"Copilot: Payload created (JSON parsed)")
+                print("Copilot: Payload created (JSON parsed)")
             else:
-                # FALLBACK: JSON parsing failed — use raw text
                 print("Copilot: JSON parse failed. Using fallback payload.")
                 final = self._build_error_payload(
                     error,
                     reason=f"Fix for: {error['message']}",
-                    code=text  # Raw LLM output as code
+                    code=text
                 )
-                final['type'] = 'syntax_error'
-            
-            # Always emit a valid payload
+
             self.observer.signals.suggestion_ready.emit(final)
             print("Copilot: Signal emitted: suggestion_ready")
-                
+
         except Exception as e:
             print(f"Copilot LLM Error: {e}")
-            # RECOVERY: Emit fallback so UI doesn't freeze
             fallback = self._build_error_payload(
                 error,
                 reason=f"Error detected: {error['message']}",
@@ -368,194 +808,246 @@ OUTPUT JSON ONLY:
             self.observer.signals.suggestion_ready.emit(fallback)
 
     def handle_resolution(self):
-        # Emit signal to hide bubble/overlay
         print("Copilot: Resolving error state via Signal.")
         self.observer.signals.error_resolved.emit()
 
+    # ------------------------------------------------------------------
+    # Visual fallback
+    # ------------------------------------------------------------------
+
     def handle_visual_fallback(self, snapshot):
-        # Visual check logic (migrated from Observer)
-        # Check if mode is appropriate
-        mode_primary = snapshot.get('mode_primary', 'general')
+        mode_primary   = snapshot.get('mode_primary', 'general')
         mode_secondary = snapshot.get('mode_secondary', 'unknown')
-        should_check = False
-        
-        # Check Strategy based on Secondary Mode
-        if mode_secondary in ['terminal', 'browser', 'unknown']:
-            should_check = True
-        elif mode_primary == 'general':
-            should_check = True
-        elif mode_primary in ['developer', 'chat', 'writing', 'reading']:
-            # STRICT MODE: Disable visual fallback in clear productive modes
-            should_check = False
-                
-        if should_check:
-             # Rate Limiting (shared 1.5s cooldown)
-             now = time.time()
-             if now - self.last_llm_call_time < 1.5:
-                 return
 
-             # Capture via Observer
-             img = self.observer.capture_screen()
-             win_title = snapshot.get('window_title', 'Unknown').lower()
-             
-             # Double Check: If active window is Cora UI, ABORT
-             cora_keywords = ["cora", "assistant", "suggestion"]
-             if any(kw in win_title for kw in cora_keywords):
-                 return
+        should_check = mode_secondary in ('terminal', 'browser', 'unknown') or \
+                       mode_primary in ('general', 'reading')
+        if not should_check:
+            return
 
-             # Analyze
-             payload = self.observer.analyze(img, context_text=f"Active Window: {win_title}")
-             if payload:
-                 # Store proactive context for grounded suggestion execution
-                 self.last_proactive_context = {
-                     'mode_primary': snapshot.get('mode_primary', snapshot.get('mode', 'general')),
-                     'window_title': win_title,
-                     'reason': payload.get('reason', ''),
-                     'ocr_text': self.observer.last_ocr_text,
-                     'screenshot': self.observer.last_proactive_screenshot,
-                     'error_file': '', 'error_line': '', 'error_message': '', 'error_context': '',
-                     'file_content': '',
-                 }
-                 self.process_visual_payload(payload)
+        now = time.time()
+        if now - self.last_llm_call_time < 2.0:
+            return
+
+        ocr_text = getattr(self.observer, 'last_ocr_text', '')
+        if ocr_text and ocr_text == self.last_ocr_text_cache:
+            return
+
+        win_title = snapshot.get('window_title', 'Unknown').lower()
+        if any(kw in win_title for kw in ["cora ai", "cora suggestion"]):
+            return
+
+        self.last_llm_call_time = now
+
+        import threading
+        def _worker():
+            try:
+                img = self.observer.capture_screen()
+                if img is None:
+                    return
+                payload = self.observer.analyze(img, context_text=f"Active Window: {win_title}")
+                if payload and isinstance(payload, dict):
+                    reason = payload.get('reason', '')
+                    sig    = f"{reason}:{win_title}"
+                    if sig == self.last_suggestion_sig:
+                        return
+                    self._store_proactive_context(
+                        snapshot, mode_primary, win_title, reason, ocr_text
+                    )
+                    self.last_suggestion_sig  = sig
+                    self.last_suggestion_time = time.time()
+                    self.observer.signals.suggestion_ready.emit(payload)
+            except Exception as e:
+                print(f"Visual fallback worker error: {e}")
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    # ------------------------------------------------------------------
+    # Writing handler
+    # ------------------------------------------------------------------
 
     def handle_writing_assistance(self, snapshot):
         print("Copilot: ✍️ Writing Pause Detected. Analyzing...")
         try:
-             # Rate Limiting (shared 1.5s cooldown)
-             now = time.time()
-             if now - self.last_llm_call_time < 1.5:
-                 return
+            now = time.time()
+            if now - self.last_llm_call_time < 0.6:
+                return
+            self.last_llm_call_time = now
 
-             # 1. Capture Screen (Productivity App)
-             img = self.observer.capture_screen()
-             win_title = snapshot.get('window_title', 'Unknown Application')
-             
-             # 2. Re-use Observer.analyze for robust OCR + Vision + JSON
-             print(f"Copilot: Analyzing Writing Context in '{win_title}'...")
-             payload = self.observer.analyze(img, context_text=f"User is writing in {win_title}")
-             
-             # 3. Process
-             if payload:
-                 print(f"WRITING PAYLOAD: {payload}")
-                 confidence = payload.get('confidence', 0.0)
-                 
-                 # 4. Check Thresholds (Lower for writing)
-                 if confidence > config.WRITING_THRESHOLD:
-                     payload['type'] = 'writing_suggestion'
-                     
-                     # Enforce Structure
-                     if 'suggestions' not in payload or not payload['suggestions']:
-                         payload['suggestions'] = [
-                             {"label": "Explain", "hint": "Explain this content"},
-                             {"label": "Summarize", "hint": "Summarize this content"}
-                         ]
+            win_title  = snapshot.get('window_title', 'Unknown Application')
+            ocr_text   = getattr(self.observer, 'last_ocr_text', '')
+            current_ocr = ocr_text
 
-                     # Store proactive context for grounded suggestion execution
-                     self.last_proactive_context = {
-                         'mode_primary': 'writing',
-                         'window_title': win_title,
-                         'reason': payload.get('reason', ''),
-                         'ocr_text': self.observer.last_ocr_text,
-                         'screenshot': self.observer.last_proactive_screenshot,
-                         'error_file': '', 'error_line': '', 'error_message': '', 'error_context': '',
-                         'file_content': '',
-                     }
+            # ── Emit instant suggestion immediately ───────────────────
+            instant_sig = f"writing_instant:{win_title}"
+            if instant_sig != self.last_suggestion_sig and instant_sig not in self.dismissed_signatures:
+                instant = {
+                    "type":        "writing_suggestion",
+                    "reason":      "Editing document",
+                    "reason_long": f"Working in {win_title}",
+                    "confidence":  0.75,
+                    "suggestions": [
+                        {"label": "Improve Grammar", "hint": "Fix grammar and clarity in visible text"},
+                        {"label": "Summarize",       "hint": "Summarize the visible section"},
+                        {"label": "Rewrite",         "hint": "Rewrite this paragraph more clearly"},
+                    ],
+                    "screen_context": current_ocr,
+                    "window_title":   win_title,
+                }
+                self._store_proactive_context(
+                    snapshot, 'writing', win_title, instant['reason'], current_ocr
+                )
+                self.last_suggestion_sig  = instant_sig
+                self.last_suggestion_time = time.time()
+                self.observer.signals.suggestion_ready.emit(instant)
 
-                     # 5. Deduplicate
-                     reason = payload.get('reason', '')
-                     sig = f"{reason}"
-                     
-                     if sig != self.last_visual_sig and sig not in self.dismissed_signatures:
-                         self.last_visual_sig = sig
-                         print(f"✨ Writing Suggestion: {reason}")
-                         self.observer.signals.suggestion_ready.emit(payload)
-                 else:
-                     print(f"Copilot: Low confidence ({confidence}) writing suggestion.")
-                     
+            # ── LLM enrichment in background ──────────────────────────
+            import threading
+            def _enrich():
+                try:
+                    img     = self.observer.capture_screen()
+                    payload = self.observer.analyze(
+                        img, context_text=f"User is writing in {win_title}"
+                    )
+                    if not payload:
+                        return
+                    confidence = payload.get('confidence', 0.0)
+                    if confidence <= config.WRITING_THRESHOLD:
+                        return
+                    payload['type'] = 'writing_suggestion'
+                    if not payload.get('suggestions'):
+                        payload['suggestions'] = [
+                            {"label": "Explain",   "hint": "Explain this content"},
+                            {"label": "Summarize", "hint": "Summarize this content"},
+                        ]
+                    reason = payload.get('reason', '')
+                    sig    = f"{reason}:{win_title}"
+                    if sig != self.last_visual_sig and sig not in self.dismissed_signatures:
+                        self._store_proactive_context(
+                            snapshot, 'writing', win_title, reason,
+                            getattr(self.observer, 'last_ocr_text', '')
+                        )
+                        self.last_visual_sig      = sig
+                        self.last_suggestion_sig  = sig
+                        self.last_suggestion_time = time.time()
+                        print(f"✨ Writing Enriched: {reason}")
+                        self.observer.signals.suggestion_ready.emit(payload)
+                except Exception as e:
+                    print(f"Writing enrich error: {e}")
+
+            threading.Thread(target=_enrich, daemon=True).start()
+
         except Exception as e:
             print(f"Copilot Writing Handler Error: {e}")
 
-        
-    def _clean_json(self, text):
-        """Extract JSON from LLM response. Returns dict or None."""
-        try:
-            # Strategy 1: Direct parse
-            return json.loads(text)
-        except:
-            pass
-        
-        try:
-            # Strategy 2: Extract from markdown code block
-            if "```json" in text:
-                text = text.split("```json")[1].split("```")[0].strip()
-            elif "```" in text:
-                # Could be ```python or other — try extracting JSON from first block
-                block = text.split("```")[1]
-                # If block starts with a language tag, skip it
-                if block and block.split('\n')[0].strip().isalpha():
-                    block = '\n'.join(block.split('\n')[1:])
-                text = block.split("```")[0].strip()
-            
-            # Strategy 3: Find JSON object boundaries
-            start = text.find('{')
-            end = text.rfind('}')
-            if start != -1 and end != -1 and end > start:
-                text = text[start:end+1]
-            
-            return json.loads(text)
-        except:
-            return None
+    # ------------------------------------------------------------------
+    # Reading handler
+    # ------------------------------------------------------------------
+
     def handle_reading_assistance(self, snapshot):
         print("Copilot: 📖 Reading Pause Detected. Analyzing...")
         try:
-             # Rate Limiting (shared 1.5s cooldown)
-             now = time.time()
-             if now - self.last_llm_call_time < 1.5:
-                 return
+            now = time.time()
+            if now - self.last_llm_call_time < 0.6:
+                return
+            self.last_llm_call_time = now
 
-             # 1. Capture Screen 
-             img = self.observer.capture_screen()
-             win_title = snapshot.get('window_title', 'Unknown Document')
+            img       = self.observer.capture_screen()
+            win_title = snapshot.get('window_title', 'Unknown Document')
+            print(f"Copilot: Analyzing Reading Context in '{win_title}'...")
+            payload   = self.observer.analyze(img, context_text=f"User is reading: {win_title}")
 
-             # 2. Re-use Observer.analyze for robust OCR + Vision + JSON
-             print(f"Copilot: Analyzing Reading Context in '{win_title}'...")
-             payload = self.observer.analyze(img, context_text=f"User is reading document: {win_title}")
-             
-             if payload:
-                 print(f"READING PAYLOAD: {payload}")
-                 confidence = payload.get('confidence', 0.0)
-                 
-                 if confidence > 0.6: 
-                     payload['type'] = 'reading_suggestion'
-                     
-                     # Ensure we have robust suggestions list
-                     if 'suggestions' not in payload or not payload['suggestions']:
-                         payload['suggestions'] = [
-                             {"label": "Summarize Page", "hint": "Summarize this visible page"},
-                             {"label": "Explain Concepts", "hint": "Explain key concepts on this page"},
-                             {"label": "Key Points", "hint": "Extract bullet points"}
-                         ]
-                     
-                     # Store proactive context for grounded suggestion execution
-                     self.last_proactive_context = {
-                         'mode_primary': 'reading',
-                         'window_title': win_title,
-                         'reason': payload.get('reason', ''),
-                         'ocr_text': self.observer.last_ocr_text,
-                         'screenshot': self.observer.last_proactive_screenshot,
-                         'error_file': '', 'error_line': '', 'error_message': '', 'error_context': '',
-                         'file_content': '',
-                     }
+            if payload:
+                confidence = payload.get('confidence', 0.0)
+                if confidence > 0.35:
+                    payload['type'] = 'reading_suggestion'
+                    if not payload.get('suggestions'):
+                        payload['suggestions'] = [
+                            {"label": "Summarize Page",   "hint": "Summarize this visible page"},
+                            {"label": "Explain Concepts", "hint": "Explain key concepts"},
+                            {"label": "Key Points",       "hint": "Extract bullet points"},
+                        ]
 
-                     reason = payload.get('reason', '')
-                     sig = f"{reason}"
-                     
-                     if sig != self.last_visual_sig and sig not in self.dismissed_signatures:
-                         self.last_visual_sig = sig
-                         print(f"✨ Reading Suggestion: {reason}")
-                         self.observer.signals.suggestion_ready.emit(payload)
-                 else:
-                     print(f"Copilot: Low confidence ({confidence}) reading suggestion.")
-                     
+                    reason = payload.get('reason', '')
+                    sig    = f"{reason}:{win_title}"
+
+                    if sig != self.last_visual_sig and sig not in self.dismissed_signatures:
+                        self._store_proactive_context(
+                            snapshot, 'reading', win_title, reason,
+                            getattr(self.observer, 'last_ocr_text', '')
+                        )
+                        self.last_visual_sig      = sig
+                        self.last_suggestion_sig  = sig
+                        self.last_suggestion_time = time.time()
+                        print(f"✨ Reading Suggestion: {reason}")
+                        self.observer.signals.suggestion_ready.emit(payload)
+
         except Exception as e:
             print(f"Copilot Reading Handler Error: {e}")
+
+    # ------------------------------------------------------------------
+    # Document handler
+    # ------------------------------------------------------------------
+
+    def handle_document_assistance(self, snapshot):
+        print("Copilot: 📄 Analyzing Document...")
+        try:
+            img      = self.observer.capture_screen()
+            ocr_text = self.observer.extract_text_from_screen(img)
+            if len(ocr_text) < 40:
+                return
+
+            ocr_hash = hashlib.md5(ocr_text.encode()).hexdigest()
+            if ocr_hash == self.last_ocr_text_cache:
+                return
+            self.last_ocr_text_cache = ocr_hash
+
+            win_title = snapshot.get('window_title', 'Document')
+            payload   = self.observer.analyze(
+                img,
+                context_text=f"User is writing in {win_title}. Visible Text: {ocr_text[:500]}..."
+            )
+
+            if payload and isinstance(payload, dict):
+                reason = payload.get('reason', '')
+                sig    = f"{reason}:{win_title}"
+                if sig == self.last_suggestion_sig:
+                    return
+                self._store_proactive_context(
+                    snapshot, snapshot.get('mode_primary', 'document'),
+                    win_title, reason, ocr_text
+                )
+                self.last_suggestion_sig  = sig
+                self.last_suggestion_time = time.time()
+                self.observer.signals.suggestion_ready.emit(payload)
+
+        except Exception as e:
+            print(f"Copilot Document Handler Error: {e}")
+
+    # ------------------------------------------------------------------
+    # Utilities
+    # ------------------------------------------------------------------
+
+    def stop(self):
+        self.running = False
+        self.wait()
+
+    def _clean_json(self, text):
+        try:
+            return json.loads(text)
+        except Exception:
+            pass
+        try:
+            if "```json" in text:
+                text = text.split("```json")[1].split("```")[0].strip()
+            elif "```" in text:
+                block = text.split("```")[1]
+                if block and block.split('\n')[0].strip().isalpha():
+                    block = '\n'.join(block.split('\n')[1:])
+                text = block.split("```")[0].strip()
+            start = text.find('{')
+            end   = text.rfind('}')
+            if start != -1 and end != -1 and end > start:
+                text = text[start:end + 1]
+            return json.loads(text)
+        except Exception:
+            return None

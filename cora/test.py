@@ -1,1 +1,2 @@
-def colon(x):
+if <condition>:
+    # commands

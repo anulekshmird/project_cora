@@ -1,0 +1,13 @@
+.env
+__pycache__/
+*.py[cod]
+*$py.class
+.chats/
+chats/
+debug.log
+debug_temp.log
+.gemini/
+.agents/
+.agent/
+_agents/
+_agent/
