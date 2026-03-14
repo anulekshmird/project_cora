@@ -95,7 +95,10 @@ class ContextManager(QObject):
                 selected_text= self._selection_ctx.selected_text,
                 visible_text = base.visible_text,
                 url          = base.url,
+                page_title   = base.page_title,
                 file_path    = base.file_path,
+                activity     = base.activity,
+                needs        = base.needs,
                 source       = 'selection',
                 timestamp    = self._selection_ctx.timestamp,
             )
@@ -108,6 +111,9 @@ class ContextManager(QObject):
                 visible_text = self._region_ctx.visible_text,
                 image        = self._region_ctx.image,
                 url          = base.url,
+                page_title   = base.page_title,
+                activity     = base.activity,
+                needs        = base.needs,
                 source       = 'region',
                 timestamp    = self._region_ctx.timestamp,
             )

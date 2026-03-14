@@ -186,6 +186,7 @@ class ProactiveBubble(QWidget):
         self.content_label = QLabel("Content...")
         self.content_label.setObjectName("content")
         self.content_label.setWordWrap(True)
+        self.content_label.setTextFormat(Qt.TextFormat.RichText)
         self.content_label.setMaximumWidth(340)
         self.content_label.setAlignment(
             Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft
@@ -395,6 +396,62 @@ class ProactiveBubble(QWidget):
         x = self.screen_geo.x() + self.screen_geo.width()  - total_w
         y = self.screen_geo.y() + self.screen_geo.height() - total_h
         self.setGeometry(x, y, total_w, total_h)
+
+    def set_context_status(self, ctx_data: object):
+        """Update the bubble's description while idle or if panel is visible."""
+        # ctx_data is a Context object from context_extractor
+        activity = getattr(ctx_data, 'activity', 'general_browsing')
+        app      = getattr(ctx_data, 'app', 'general')
+        file_path = getattr(ctx_data, 'file_path', None)
+        
+        # Human friendly labels
+        APP_LABELS = {
+            "editor":  "VS Code",
+            "browser": "Web Browser",
+            "youtube": "YouTube",
+            "word":    "Microsoft Word",
+            "claude":  "Claude AI",
+            "idle":    "Desktop",
+        }
+        
+        LABELS = {
+            "coding":           "Coding",
+            "debugging_error":  "Debugging Error",
+            "watching_video":   "Watching Video",
+            "reading_article":  "Reading Article",
+            "reading_pdf":      "Reading PDF",
+            "writing_document": "Writing",
+            "chatting":         "Chatting",
+            "browsing_repo":    "Browsing Repo",
+            "searching_topic":  "Searching",
+            "general_browsing": "Browsing",
+            "idle":             "Need any help?",
+        }
+        
+        app_name = APP_LABELS.get(app, app.capitalize())
+        
+        # Build "Doing" part
+        if activity == "coding" and file_path:
+            doing = f"Editing {file_path}"
+        elif activity == "writing_document" and file_path:
+            doing = f"Writing {file_path}"
+        elif activity == "reading_pdf" and file_path:
+            doing = f"Reading {file_path}"
+        else:
+            doing = LABELS.get(activity, activity.replace('_', ' ').capitalize())
+        
+        # Format as HTML for premium look
+        status_html = f"<b>You’re in:</b> {app_name}<br><b>Looks like:</b> {doing}"
+        
+        # If we are in IDLE state or only basic suggestion, update content_label as a status indicator
+        if self.orb_state == self.STATE_IDLE or (self.current_data and self.current_data.get('type') == 'general'):
+             self.content_label.setText(status_html)
+             if self.orb_state == self.STATE_IDLE:
+                 self.header_label.setText("Cora Observer")
+        
+        # Also update window title in data if it exists
+        if self.current_data:
+            self.current_data['window_title'] = getattr(ctx_data, 'window_title', '')
 
     # ── Show suggestion ──────────────────────────────────────────────
 

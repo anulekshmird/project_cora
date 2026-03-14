@@ -107,6 +107,9 @@ class CoraApp(QObject):
         self.ai_engine.stream_chunk.connect(self.chat_win.append_stream_chunk)
         self.ai_engine.stream_done.connect(self.chat_win.on_stream_done)
 
+        # Layer 3 → Layer 5 (Reactive UI)
+        self.ctx_manager.context_updated.connect(self._on_context_updated)
+
         # UI actions → pipeline
         self.bubble.dismissed.connect(self._on_dismissed)
         self.bubble.ask_cora_clicked.connect(self._on_chip_clicked)
@@ -240,6 +243,30 @@ class CoraApp(QObject):
         print("Stop requested.")
         # self.ai_engine needs stop logic if supported
 
+    def _on_context_updated(self, ctx):
+        """Handle real-time context changes by updating UI elements immediately."""
+        # Update Chat Window header
+        if hasattr(self.chat_win, 'set_context'):
+            self.chat_win.set_context(ctx)
+        
+        # update_mode_indicator now takes activity as keyword arg
+        self.chat_win.update_mode_indicator(ctx.app, activity=ctx.activity)
+        
+        # Update Proactive Bubble idle status
+        if hasattr(self.bubble, 'set_context_status'):
+            self.bubble.set_context_status(ctx)
+            # Ensure bubble pops up immediately on context change
+            if not self.chat_win.isVisible():
+                self.bubble.show()
+        
+        # Force label for idle state
+        if ctx.activity == 'idle':
+             # Maybe show a special chip or just the idle status
+             pass
+
+        # Log to terminal for verification
+        print(f"[REACTIVE UI] Activity: {ctx.activity} | App: {ctx.app}")
+
     def _on_system_event(self, event_type: str, event_data: dict):
         from system_observer import SystemEvent
         import time
@@ -285,52 +312,82 @@ class CoraApp(QObject):
     def _show_instant_chips(self, title: str):
         """Show instant chips for the new window while AI processes."""
         from PyQt6.QtCore import QTimer
+        import re
         tl = title.lower()
+        
+        app_name = "Unknown App"
+        doing    = "Observing activity..."
+        chips    = []
 
         if any(k in tl for k in ['word', '.docx', 'document', 'writer']):
+            app_name = "Microsoft Word"
+            match = re.search(r'([a-zA-Z0-9_\-\s]+\.docx?)', title)
+            fname = match.group(1) if match else "document"
+            doing = f"Writing {fname}"
             chips = [
                 {"label": "Fix Grammar",   "hint": f"Fix grammar in the document"},
                 {"label": "Improve",       "hint": f"Improve clarity of the text"},
                 {"label": "Summarize",     "hint": f"Summarize the document"},
             ]
-            reason = "Word Document"
         elif any(k in tl for k in ['chrome', 'edge', 'firefox', 'opera']):
+            app_name = "Web Browser"
+            if "youtube" in tl: app_name = "YouTube"
+            elif "github" in tl: app_name = "GitHub"
+            elif "whatsapp" in tl: app_name = "WhatsApp"
+            
+            doing = "Browsing web content"
             chips = [
                 {"label": "Summarize",     "hint": "Summarize this page"},
                 {"label": "Key Points",    "hint": "List key points from this page"},
                 {"label": "Explain",       "hint": "Explain the main topic"},
             ]
-            reason = "Browser"
         elif any(k in tl for k in ['code', 'vscode', '.py', '.js', '.ts']):
+            app_name = "VS Code" if ("code" in tl or "vscode" in tl) else "Code Editor"
+            match = re.search(r'([a-zA-Z0-9_\-]+\.[a-z]{1,4})', title)
+            fname = match.group(1) if match else "source file"
+            doing = f"Editing {fname}"
             chips = [
                 {"label": "Review Code",   "hint": "Review the visible code"},
                 {"label": "Find Bugs",     "hint": "Find bugs in this code"},
                 {"label": "Explain Code",  "hint": "Explain what this code does"},
             ]
-            reason = "Code Editor"
         elif any(k in tl for k in ['youtube', 'youtu.be']):
+            app_name = "YouTube"
+            doing = "Watching video"
             chips = [
                 {"label": "Summarize",     "hint": "Summarize this video"},
                 {"label": "Key Points",    "hint": "Key points from this video"},
             ]
-            reason = "YouTube"
         elif '.pdf' in tl:
+            app_name = "PDF Reader"
+            match = re.search(r'([a-zA-Z0-9_\-\s]+\.pdf)', title)
+            fname = match.group(1) if match else "document"
+            doing = f"Reading {fname}"
             chips = [
                 {"label": "Summarize PDF", "hint": "Summarize this PDF"},
                 {"label": "Key Points",    "hint": "Extract key points"},
                 {"label": "Explain",       "hint": "Explain the content"},
             ]
-            reason = "PDF Document"
+        elif app_name == "idle" or not title or any(k in tl for k in ['taskbar', 'system tray', 'desktop', 'program manager']):
+            app_name = "Desktop"
+            doing    = "Resting"
+            chips    = [
+                {"label": "Need any help?", "hint": "Ask Cora for assistance"},
+                {"label": "Check Reminders", "hint": "See if you have tasks"},
+                {"label": "What can you do?", "hint": "Learn about Cora's features"},
+            ]
         else:
             return  # No instant chips for unknown apps
 
         payload = {
             "type":        "general",
-            "reason":      f"Switched to {reason}",
-            "reason_long": "Reading screen content...",
+            "reason":      f"<b>You’re in:</b> {app_name}<br><b>Looks like:</b> {doing}",
+            "reason_long": f"Cora noticed you're {doing.lower()} and is ready to help.",
             "confidence":  0.7,
             "suggestions": chips,
         }
+        # Force show bubble instantly
+        self.bubble.show()
         QTimer.singleShot(0, lambda: self.bubble.show_suggestion(payload))
 
 
@@ -427,6 +484,7 @@ class CoraApp(QObject):
     def _on_suggestion_ready(self, payload: dict):
         """Layer 4 → Layer 5: Show suggestion in UI."""
         print(f"[UI] Suggestion ready: {payload.get('reason','')[:50]}")
+        self.bubble.show() # Force pop up
         self.bubble.show_suggestion(payload)
 
     def _on_dismissed(self):
@@ -608,8 +666,8 @@ class CoraApp(QObject):
 
         payload = {
             "type":           "picked_suggestion",
-            "reason":         reason,
-            "reason_long":    f"Content type: {content_type}. Click a chip to act on it.",
+            "reason":         f"<b>You’re in:</b> Screen Snipper<br><b>Looks like:</b> {reason}",
+            "reason_long":    f"You just picked a {content_type.replace('_',' ')} to ask about.",
             "confidence":     0.95,
             "suggestions":    chips,
             "screen_context": ocr_text,
@@ -617,6 +675,8 @@ class CoraApp(QObject):
             "app":            self.ctx_manager.get().app,
             "source":         "region",
         }
+        # Force show bubble instantly
+        self.bubble.show()
         QTimer.singleShot(0, lambda: self.bubble.show_suggestion(payload))
 
     def on_pick_cancelled(self):

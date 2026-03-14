@@ -1,37 +1,39 @@
-"""
-ocr_engine.py — CORA OCR Engine
-================================================
-Provides text extraction via two strategies:
-
-1. NATIVE extraction  — for Word / PDF / PPTX files where the file
-   path is known. Always preferred over screenshot OCR.
-
-2. SCREENSHOT OCR     — Tesseract with a preprocessing pipeline
-   tuned for each document type (dense text, code, general UI).
-
-Usage:
-    from ocr_engine import extract_text, extract_from_file, OCRMode
-
-    # Screenshot path (auto-selects best mode)
-    text = extract_text(pil_image, mode=OCRMode.DOCUMENT)
-
-    # File path (native — no Tesseract needed)
-    text = extract_from_file("/path/to/report.docx")
-"""
-
 import re
 import io
 import os
 from enum import Enum
 from PIL import Image, ImageFilter, ImageEnhance, ImageOps
 
+print(f"DEBUG: Loading ocr_engine.py from {__file__}")
 
 # ── OCR backend (Tesseract via pytesseract) ──────────────────────────────────
 try:
     import pytesseract
-    # Path to Tesseract executable discovered on this machine
-    pytesseract.pytesseract.tesseract_cmd = r'C:\Users\ADITHYA\AppData\Local\Programs\Tesseract-OCR\tesseract.exe'
-    TESSERACT_AVAILABLE = True
+    import shutil
+    
+    # Try reaching common tesseract paths or finding it in the system environment
+    COMMON_PROG_FILES = os.environ.get("ProgramFiles", r"C:\Program Files")
+    COMMON_LOCAL_APP = os.path.join(os.environ.get("LOCALAPPDATA", ""), "Programs", "Tesseract-OCR", "tesseract.exe")
+
+    tesseract_paths = [
+        shutil.which("tesseract"), # If in system path
+        os.path.join(COMMON_PROG_FILES, "Tesseract-OCR", "tesseract.exe"),
+        COMMON_LOCAL_APP
+    ]
+
+    tesseract_exe = None
+    for path in tesseract_paths:
+        if path and os.path.exists(path):
+            tesseract_exe = path
+            break
+
+    if tesseract_exe:
+        pytesseract.pytesseract.tesseract_cmd = tesseract_exe
+        TESSERACT_AVAILABLE = True
+        print(f"OCR Engine: Tesseract ready at {tesseract_exe}")
+    else:
+        TESSERACT_AVAILABLE = False
+        print("OCR Engine: Tesseract executable not found.")
 except ImportError:
     TESSERACT_AVAILABLE = False
     print("OCR Engine: pytesseract not found. Screenshot OCR disabled.")

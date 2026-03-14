@@ -630,22 +630,36 @@ class ChatWindow(QMainWindow):
         self.copy_feedback.setVisible(True)
         QTimer.singleShot(2000, lambda: self.copy_feedback.setVisible(False))
         
-    def update_mode_indicator(self, mode: str, reason: str = ""):
+    def update_mode_indicator(self, mode: str, reason: str = "", activity: str = ""):
         if reason:
             display = reason if len(reason) <= 72 else reason[:69] + "…"
             self.mode_label.setText(display)
             return
+
         ICONS = {
-            "developer": "💻  Developer",
-            "writing": "✍️  Writing",
-            "reading": "📖  Reading",
-            "pdf": "📄  PDF",
-            "spreadsheet": "📊  Spreadsheet",
-            "browser": "🌐  Browser",
-            "youtube": "▶️  YouTube",
-            "general": "🤖  General",
+            "coding":           "💻  Coding",
+            "debugging_error":  "🐛  Debugging",
+            "watching_video":   "🎬  Watching Video",
+            "reading_article":  "📖  Reading Article",
+            "reading_pdf":      "📄  Reading PDF",
+            "writing_document": "📝  Writing",
+            "chatting":         "💬  Chatting",
+            "browsing_repo":    "📂  Browsing Repo",
+            "searching_topic":  "🔍  Searching",
+            "general_browsing": "🌐  Browsing",
+            "developer":        "💻  Developer",
+            "writing":          "✍️  Writing",
+            "reading":          "📖  Reading",
+            "pdf":              "📄  PDF",
+            "spreadsheet":      "📊  Spreadsheet",
+            "browser":          "🌐  Browser",
+            "youtube":          "▶️  YouTube",
+            "general":          "🤖  General",
         }
-        self.mode_label.setText(ICONS.get(mode, f"🤖  {mode.capitalize()}"))
+        
+        # Prioritize activity label if provided
+        label = ICONS.get(activity) or ICONS.get(mode) or f"🤖  {mode.capitalize()}"
+        self.mode_label.setText(label)
 
     def on_ai_response_start(self, initial_text: str):
         self._stream_buffer = ""
@@ -758,9 +772,27 @@ class ChatWindow(QMainWindow):
 
     def get_history(self):
         """Return history in role/content list format for AI Engine."""
-        # Simple implementation: main.py usually manages history via observer, 
-        # but for now we extract from UI or return empty if not tracked here.
-        return [] # main.py handles session switches and history replay
+        history = []
+        # Access self.chat_display contents
+        layout = self.chat_display.layout
+        for i in range(layout.count()):
+            item = layout.itemAt(i)
+            w = item.widget()
+            if w and isinstance(w, MessageBubble):
+                role = "user" if w.is_user else "model"
+                # Extract text from msg_label, removing HTML
+                raw_text = w.msg_label.text()
+                # Simple HTML strip if needed, but Gemini handles small HTML ok.
+                # However, for history, cleaner is better.
+                import re
+                clean_text = re.sub('<[^<]+?>', '', raw_text)
+                
+                # Strip "COPY" and language labels from formatted code blocks
+                # These are added by ResponseFormatter (e.g., "PYTHON COPY")
+                clean_text = re.sub(r'\b[A-Z0-9+]+\s+COPY\b', '', clean_text)
+                
+                history.append({"role": role, "content": clean_text.strip()})
+        return history
         
     # Helper to clean/prep markdown text if needed
     def clean_text(self, text):

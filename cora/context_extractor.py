@@ -17,8 +17,11 @@ class Context:
     selected_text:  str            = ""
     visible_text:   str            = ""
     url:            Optional[str]  = None
+    page_title:     Optional[str]  = None
     file_path:      Optional[str]  = None
     image:          Optional[bytes]= None
+    activity:       str            = "general_browsing"
+    needs:          list           = field(default_factory=list)
     source:         str            = "window"  # window|selection|region|ocr
     timestamp:      float          = field(default_factory=time.time)
 
@@ -96,7 +99,10 @@ class ContextExtractor:
             )
 
         # Classify app and mode
-        if any(k in tl for k in ['chrome', 'firefox', 'edge', 'browser']):
+        if any(k in tl for k in ['youtube', 'video', 'watch']):
+            app  = 'youtube'
+            mode = 'video'
+        elif any(k in tl for k in ['chrome', 'firefox', 'edge', 'browser']):
             app  = 'browser'
             mode = 'web'
         elif any(k in tl for k in ['word', '.docx', 'document']):
@@ -108,14 +114,36 @@ class ContextExtractor:
         elif 'claude' in tl:
             app  = 'claude'
             mode = 'ai'
-        elif any(k in tl for k in ['youtube', 'video']):
-            app  = 'youtube'
-            mode = 'video'
+        elif not title or any(k in tl for k in ['taskbar', 'system tray', 'desktop', 'program manager']):
+            app  = 'idle'
+            mode = 'general'
         else:
             app  = 'general'
             mode = 'general'
+        
+        # Heuristic extraction for file path and URL
+        file_path = None
+        url = None
+        
+        if app == 'editor':
+            import re
+            # Try to find something that looks like a filename or path
+            # matches: file.py, path/to/file.js, [path], etc.
+            match = re.search(r'([a-zA-Z0-9_\-/\\]+\.[a-zA-Z0-9]{1,5})', title)
+            if match:
+                file_path = match.group(1)
+        
+        if app == 'browser':
+            import re
+            # Extract domain-like patterns from title
+            # matches: example.com, sub.domain.org, etc.
+            match = re.search(r'([a-z0-9]+([\-.][a-z0-9]+)*\.[a-z]{2,5})', tl)
+            if match:
+                url = match.group(1)
+        
+        print(f"DEBUG: Classified window '{title}' as app='{app}' mode='{mode}' file='{file_path}' url='{url}'")
 
-        # Run OCR asynchronously for visible text
+        # Run OCR asynchronously for visible_text
         visible_text = ""
         if self._ocr_engine and app not in ('claude',):
             try:
@@ -133,16 +161,137 @@ class ContextExtractor:
                             "RGB", sct_img.size, sct_img.bgra, "raw", "BGRX"
                         )
                 
-                visible_text = self._ocr_engine(img, title, mode)[:3000]
+                visible_text = self._ocr_engine(
+                    image=img, 
+                    window_title=title, 
+                    mode_primary=mode
+                )[:3000]
             except Exception as e:
                 print(f"OCR error in extractor: {e}")
+
+        # Activity and needs inference
+        page_title = title.split(' - ')[0] if ' - ' in title else title
+        ctx_temp = {
+            "app": app,
+            "window_title": title,
+            "visible_text": visible_text,
+            "page_title": page_title
+        }
+        activity = self.infer_user_activity(ctx_temp)
+        needs = self.get_likely_needs(activity)
 
         return Context(
             app          = app,
             mode         = mode,
             window_title = title,
             visible_text = visible_text,
+            page_title   = page_title,
+            activity     = activity,
+            needs        = needs,
+            url          = url,
+            file_path    = file_path,
             source       = 'window',
+            timestamp    = data.get('timestamp', time.time()),
+        )
+
+    def infer_user_activity(self, context: dict) -> str:
+        text = (context.get("visible_text") or "").lower()
+        title = (context.get("window_title") or "").lower()
+        app = (context.get("app") or "").lower()
+
+        if not title or any(k in title for k in ['taskbar', 'system tray', 'desktop', 'program manager']):
+            return "idle"
+        if "youtube" in title or "youtube" in app or "watch" in title:
+            return "watching_video"
+        if "github" in text or "github" in title:
+            return "browsing_repo"
+        if any(k in text for k in ["error", "traceback", "exception", "failed"]):
+            return "debugging_error"
+        if any(k in title for k in [".py", ".js", ".ts", "code", "editor", "pycharm"]):
+            return "coding"
+        if any(k in text for k in ["what is", "overview", "learn", "how to"]):
+            return "reading_article"
+        if any(k in title for k in ["whatsapp", "telegram", "discord", "slack"]):
+            return "chatting"
+        if any(x in title for x in ["word", ".docx", "document"]):
+            return "writing_document"
+        if ".pdf" in title:
+            return "reading_pdf"
+
+        return "general_browsing"
+
+    def get_likely_needs(self, activity: str) -> list:
+        NEEDS_MAP = {
+            "reading_article": [
+                "explain_topic",
+                "summarize_content",
+                "extract_key_points",
+                "create_notes"
+            ],
+            "debugging_error": [
+                "fix_error",
+                "explain_error",
+                "suggest_commands",
+                "show_corrected_code"
+            ],
+            "watching_video": [
+                "summarize_video",
+                "extract_learning_points",
+                "explain_topic",
+                "create_notes"
+            ],
+            "chatting": [
+                "draft_reply",
+                "rewrite_message",
+                "summarize_chat",
+                "extract_action_items"
+            ],
+            "browsing_repo": [
+                "explain_repo",
+                "list_key_files",
+                "show_architecture",
+                "summarize_project"
+            ],
+            "coding": [
+                "review_code",
+                "explain_logic",
+                "optimize_performance",
+                "write_unit_tests"
+            ],
+            "writing_document": [
+                "improve_grammar",
+                "rewrite_for_clarity",
+                "summarize_section",
+                "suggest_heading"
+            ],
+            "reading_pdf": [
+                "summarize_pdf",
+                "explain_concepts",
+                "extract_data",
+                "translate_text"
+            ],
+            "idle": [
+                "Suggest actions",
+                "Check reminders",
+                "Explain Cora",
+                "Need any help?"
+            ]
+        }
+        return NEEDS_MAP.get(activity, ["general_assistance", "answer_question"])
+
+    def _from_selection(self, data: dict) -> Context:
+        text = data.get('text', '')
+        return Context(
+            selected_text = text,
+            source        = 'selection',
+            timestamp     = data.get('timestamp', time.time()),
+        )
+
+    def _from_region(self, data: dict) -> Context:
+        return Context(
+            visible_text = data.get('ocr_text', ''),
+            image        = data.get('image'),
+            source       = 'region',
             timestamp    = data.get('timestamp', time.time()),
         )
 
@@ -188,19 +337,3 @@ class ContextHelpers:
         except Exception as e:
             print(f"[ContextHelpers] Capture error: {e}")
             return None
-
-    def _from_selection(self, data: dict) -> Context:
-        text = data.get('text', '')
-        return Context(
-            selected_text = text,
-            source        = 'selection',
-            timestamp     = data.get('timestamp', time.time()),
-        )
-
-    def _from_region(self, data: dict) -> Context:
-        return Context(
-            visible_text = data.get('ocr_text', ''),
-            image        = data.get('image'),
-            source       = 'region',
-            timestamp    = data.get('timestamp', time.time()),
-        )

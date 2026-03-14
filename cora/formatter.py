@@ -35,8 +35,8 @@ class ResponseFormatter:
         text = ResponseFormatter._apply_section_headers(text)
         text = ResponseFormatter._apply_inline_markdown(text)
         text = ResponseFormatter._apply_block_markdown(text)
-        text = ResponseFormatter._restore_code_blocks(text, code_blocks)
         text = ResponseFormatter._newlines_to_br(text)
+        text = ResponseFormatter._restore_code_blocks(text, code_blocks)
         return text.strip()
 
     # ------------------------------------------------------------------
@@ -46,9 +46,9 @@ class ResponseFormatter:
     @staticmethod
     def _sanitize(text: str) -> str:
         # ── Strip hallucinated CODEBLOCK placeholder text ──────────────
-        # llava sometimes writes the literal word "CODEBLOCK0" or "CODE BLOCK 1"
+        # llava or Gemini sometimes write "CODE_BLOCK_0" or "CODE BLOCK 1"
         # instead of actual fenced code. Remove these so they never render.
-        text = re.sub(r'\bCODE\s*BLOCK\s*\d+\b', '', text, flags=re.IGNORECASE)
+        text = re.sub(r'\bCODE[_\s]*BLOCK[_\s]*\d+\b', '', text, flags=re.IGNORECASE)
 
         # ── Drop bare JSON-only payloads (internal LLM artifacts) ──────
         # Only drop it if the ENTIRE response (after stripping) is a JSON
@@ -87,7 +87,7 @@ class ResponseFormatter:
             code = m.group(2)
             code_escaped = html.escape(code)
             blocks.append((lang, code_escaped))
-            return f"__CODE_BLOCK_{len(blocks) - 1}__"
+            return f"<<CB_{len(blocks) - 1}>>"
 
         text = re.sub(
             r"```([a-zA-Z0-9_+-]*)[ \t]*\n?(.*?)```",
@@ -319,7 +319,7 @@ class ResponseFormatter:
                 f'">{code_escaped}</pre>'
                 f'</div>'
             )
-            text = text.replace(f"__CODE_BLOCK_{i}__", styled)
+            text = text.replace(f"<<CB_{i}>>", styled)
         return text
 
     # ------------------------------------------------------------------
@@ -341,7 +341,7 @@ class ResponseFormatter:
             placeholder_map[token] = original
             return token
 
-        text = re.sub(r"__CODE_BLOCK_(\d+)__", _shield, text)
+        text = re.sub(r"<<CB_(\d+)>>", _shield, text)
 
         result = []
         in_tag = False

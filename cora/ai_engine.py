@@ -32,10 +32,13 @@ class AIEngine(QObject):
             api_key = os.getenv("GEMINI_API_KEY", "")
             if not api_key:
                 print("WARNING: GEMINI_API_KEY not set")
-            self._client = genai.Client(api_key=api_key)
-            self._types  = types
-            self._sdk    = "new"
-            print(f"AIEngine: Gemini Client (v2) ready ({model_name})")
+                self._client = None
+                self._sdk    = None
+            else:
+                self._client = genai.Client(api_key=api_key)
+                self._types  = types
+                self._sdk    = "new"
+                print(f"AIEngine: Gemini Client (v2) ready ({model_name})")
         except ImportError:
             try:
                 import google.generativeai as genai
@@ -110,7 +113,8 @@ class AIEngine(QObject):
         app_hint = app_hints.get(ctx.app, 'User is working on their computer.')
 
         return f"""You are CORA, a smart desktop AI assistant.
-{app_hint}
+USER ACTIVITY: {ctx.activity}
+LIKELY NEEDS: {', '.join(ctx.needs)}
 
 ACTIVE WINDOW: {ctx.window_title}
 CONTENT:
@@ -118,14 +122,14 @@ CONTENT:
 {content[:3000]}
 {'='*40}
 
-Suggest the 3 most useful actions for this exact content.
+Suggest the 3 most useful actions for this exact content and activity.
 Be SPECIFIC — mention actual words, topics, or code from the content above.
 Do NOT give generic suggestions like "summarize" without context.
 
 Respond ONLY in this exact JSON format, nothing else:
 {{
-  "reason": "What you see on screen in 8 words or less",
-  "reason_long": "One specific sentence about what would help most",
+  "reason": "You’re in: [App Name] | Looks like: [Natural description of activity]",
+  "reason_long": "One specific sentence about what would help most for the detected task",
   "confidence": 0.95,
   "suggestions": [
     {{"label": "Short Action", "hint": "Specific instruction using actual content"}},
@@ -208,23 +212,27 @@ Respond ONLY in this exact JSON format, nothing else:
             'window':    'CURRENT SCREEN CONTENT',
         }.get(ctx.source, 'SCREEN CONTENT')
 
-        return f"""You are CORA, a desktop AI assistant with full context of what the user is doing.
+        return f"""You are CORA, a desktop AI assistant. You have full visibility of the user's screen.
 
-{source_label} (use this as your primary reference):
+{source_label}:
 {'='*40}
-{content[:6000]}
+{content[:8000]}
 {'='*40}
 
 APP: {ctx.app} | WINDOW: {ctx.window_title}
+ACTIVITY: {ctx.activity} | NEEDS: {', '.join(ctx.needs)}
 
 USER REQUEST: {user_message}
 
-RULES:
-- Answer based on the screen content above
-- Be specific and immediately useful
-- Do NOT say "I can see..." or describe the content
-- Just directly help with what was asked
-- If asked to fix/rewrite/improve something, show the actual result"""
+CRITICAL RULES:
+- The content above IS what the user is looking at. Analyze it deeply in the context of their activity: {ctx.activity}.
+- Do NOT just restate the filename or app name.
+- If the user asks for an explanation, explain the ACTUAL LOGIC or MEANING of the content provided.
+- Be extremely specific. Mention variable names, specific sentences, or values found in the content.
+- If asked to fix or rewrite, provide the complete corrected version.
+- NEVER use placeholders like "CODE_BLOCK_N" or "CODE_BLOCK".
+- ALWAYS write out the full code inside the response using triple backticks.
+- Tailor your response to the user's current need: {', '.join(ctx.needs)}."""
 
     def _build_message_history(self, history: list, prompt: str) -> list:
         messages = []
@@ -271,8 +279,26 @@ RULES:
                     model    = self._model,
                     contents = [full_prompt],
                     config   = self._types.GenerateContentConfig(
-                        max_output_tokens = 2048,
+                        max_output_tokens = 4096,
                         temperature       = 0.7,
+                        safety_settings   = [
+                            self._types.SafetySetting(
+                                category="HARM_CATEGORY_HARASSMENT",
+                                threshold="BLOCK_NONE",
+                            ),
+                            self._types.SafetySetting(
+                                category="HARM_CATEGORY_HATE_SPEECH",
+                                threshold="BLOCK_NONE",
+                            ),
+                            self._types.SafetySetting(
+                                category="HARM_CATEGORY_SEXUALLY_EXPLICIT",
+                                threshold="BLOCK_NONE",
+                            ),
+                            self._types.SafetySetting(
+                                category="HARM_CATEGORY_DANGEROUS_CONTENT",
+                                threshold="BLOCK_NONE",
+                            ),
+                        ]
                     )
                 ):
                     try:
@@ -281,7 +307,13 @@ RULES:
                     except Exception:
                         continue
             else:
-                response = self._client.generate_content(full_prompt, stream=True)
+                safety = [
+                    {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
+                    {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
+                    {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
+                    {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
+                ]
+                response = self._client.generate_content(full_prompt, stream=True, safety_settings=safety)
                 for chunk in response:
                     try:
                         if chunk.text:
