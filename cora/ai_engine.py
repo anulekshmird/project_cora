@@ -22,7 +22,7 @@ class AIEngine(QObject):
         self._lock           = threading.Lock()
         self._generating     = False
         self._last_call_time = 0
-        self._min_call_interval = 15.0
+        self._min_call_interval = 10.0
         self._retry_after    = 0
 
         # Use new google-genai SDK
@@ -83,7 +83,8 @@ class AIEngine(QObject):
         try:
             self._last_call_time = now
             prompt   = self._build_suggestion_prompt(ctx)
-            response = self._call_llm(prompt, ctx.image)
+            # Use 0.4 temperature for proactive suggestions — stable but informative
+            response = self._call_llm(prompt, ctx.image, temperature=0.4)
             payload  = self._parse_suggestion(response, ctx)
             self.suggestion_ready.emit(payload)
         except Exception as e:
@@ -102,70 +103,48 @@ class AIEngine(QObject):
                 self._generating = False
 
     def _build_suggestion_prompt(self, ctx: Context) -> str:
-        content = ctx.best_text()
-        
-        if ctx.source == 'region':
-            return f"""You are CORA, a desktop assistant.
-Identify what is in the selected region and provide specific, helpful suggestions.
+        source_label = {
+            'window':    'FULL PAGE CONTENT',
+            'selection': 'USER SELECTION',
+            'region':    'PICKED REGION',
+            'ocr':       'SCREEN OCR'
+        }.get(ctx.source, 'CONTENT')
 
-SELECTED REGION TEXT:
-{ctx.selected_text}
+        # Regional specificity
+        img_instruction = ""
+        if ctx.source == 'region' and ctx.image:
+            img_instruction = "STRICT RULE: Focus on the provided IMAGE. The OCR text below is just a supplement. Tell the user what is VISUALLY interesting or actionable in that specific screenshot."
 
-ACTIVE APP: {ctx.app}
-FILE/PAGE: {ctx.page_title or ctx.file_path}
+        # Anti-Hallucination rules
+        strict_rules = """STRICT REALITY RULES:
+1. ONLY suggest based on the ACTUAL visible content provided below.
+2. If the content is sparse, empty, or just a window title, do NOT invent problems or solutions. Simply describe the window or offer general help.
+3. IGNORE all information, topics, or code from previous sessions or windows. This is a FRESH start.
+4. Do NOT hallucinate errors. If you see code, analyze the EXACT code shown. If you see a website, analyze THAT website."""
 
-Task:
-1. Determine exactly what is in the selected region (e.g., a specific code function, a paragraph about a topic, a YouTube comment, etc.).
-2. Return a 'reason' that is specific and grounded (e.g., "Reviewing Python logic in [file]" or "Analyzing article about [topic]").
-3. Return a 'type' like 'code_analysis', 'text_summary', 'video_help', or 'error_fix'.
-4. Return 3 targeted suggestions.
+        return f"""You are CORA, a proactive desktop AI assistant.
+Current Activity: {ctx.activity}
+Active App: {ctx.app} | Window: {ctx.window_title}
 
-Respond ONLY in this JSON format:
+{strict_rules}
+
+{img_instruction}
+
+{source_label}:
+{'='*40}
+{ctx.best_text()[:3000]}
+{'='*40}
+
+TASK: Provide 2-3 SHORT, actionable suggestions (chips) and a 1-sentence reason.
+FORMAT: JSON only.
 {{
   "type": "specific_category",
-  "reason": "Specific summary of what you see",
-  "reason_long": "One detailed sentence explaining why these suggestions help",
-  "confidence": 0.95,
+  "reason": "Brief explanation of WHY these chips were chosen based ONLY on the content above",
+  "reason_long": "One detailed sentence explaining the next step",
+  "confidence": 1.0,
   "suggestions": [
-    {{"label": "Action", "hint": "Specific detail-oriented instruction"}},
-    {{"label": "Action", "hint": "Specific detail-oriented instruction"}},
-    {{"label": "Action", "hint": "Specific detail-oriented instruction"}}
-  ]
-}}"""
-
-        app_hints = {
-            'word':    'User is writing a Word document.',
-            'editor':  'User is writing code.',
-            'browser': 'User is browsing the web.',
-            'youtube': 'User is watching a YouTube video.',
-            'pdf':     'User is reading a PDF document.',
-            'general': 'User is working on their computer.',
-        }
-        app_hint = app_hints.get(ctx.app, 'User is working on their computer.')
-
-        return f"""You are CORA, a smart desktop AI assistant.
-USER ACTIVITY: {ctx.activity}
-LIKELY NEEDS: {', '.join(ctx.needs)}
-
-ACTIVE WINDOW: {ctx.window_title}
-CONTENT:
-{'='*40}
-{content[:3000]}
-{'='*40}
-
-Suggest the 3 most useful actions for this exact content and activity.
-Be SPECIFIC — mention actual words, topics, or code from the content above.
-Do NOT give generic suggestions like "summarize" without context.
-
-Respond ONLY in this exact JSON format, nothing else:
-{{
-  "reason": "You’re in: [App Name] | Looks like: [Specific title, topic, or content description]",
-  "reason_long": "One specific sentence about what would help most for the detected task",
-  "confidence": 0.95,
-  "suggestions": [
-    {{"label": "Short Action", "hint": "Specific instruction using actual content"}},
-    {{"label": "Short Action", "hint": "Specific instruction using actual content"}},
-    {{"label": "Short Action", "hint": "Specific instruction using actual content"}}
+     {{"label": "Direct Action 1", "hint": "Specific instruction for chat"}},
+     {{"label": "Direct Action 2", "hint": "Specific instruction for chat"}}
   ]
 }}"""
 
@@ -191,6 +170,10 @@ Respond ONLY in this exact JSON format, nothing else:
         payload['window_title']   = ctx.window_title
         payload['app']            = ctx.app
         payload['source']         = ctx.source
+        payload['activity']       = ctx.activity
+        payload['file_path']      = ctx.file_path
+        payload['page_title']     = ctx.page_title
+        payload['url']            = ctx.url
         return payload
 
     # ── Chat response ─────────────────────────────────────────────────────
@@ -215,7 +198,8 @@ Respond ONLY in this exact JSON format, nothing else:
         try:
             prompt   = self._build_chat_prompt(user_message, ctx)
             messages = self._build_message_history(history, prompt)
-            self._stream_llm(messages, ctx.image)
+            # Use higher temperature for chat to allow creative/detailed explanations
+            self._stream_llm(messages, ctx.image, temperature=0.7)
             self._last_call_time = time.time()
         except Exception as e:
             err_str = str(e)
@@ -237,11 +221,39 @@ Respond ONLY in this exact JSON format, nothing else:
         if not content:
             return user_message
 
+        is_specific = ctx.source in ('selection', 'region')
         source_label = {
             'selection': 'USER SELECTED THIS TEXT',
             'region':    'USER PICKED THIS SCREEN REGION',
             'window':    'CURRENT SCREEN CONTENT',
         }.get(ctx.source, 'SCREEN CONTENT')
+
+        if is_specific:
+            # User wants to talk about THIS SPECIFIC PART. Don't drown it in full-page context.
+            img_directive = ""
+            if ctx.source == 'region' and ctx.image:
+                img_directive = "STRICT RULE: Look at the provided IMAGE of this regional selection. The visual details in the screenshot are your primary source of truth."
+
+            return f"""You are CORA, a desktop AI assistant. 
+The user has specifically pointed to this content. 
+{img_directive}
+STRICT RULE: Focus ONLY on the provided snippet/image below. IGNORE all other background information.
+
+{source_label}:
+{'='*40}
+{content[:8000]}
+{'='*40}
+
+ACTIVE APP: {ctx.app} | WINDOW: {ctx.window_title}
+
+USER REQUEST: {user_message}
+
+CRITICAL RULES:
+- Focus EXCLUSIVELY on the content/image provided above. 
+- If the content is specific (like a code snippet), provide a detailed breakdown of THAT snippet.
+- Do NOT talk about the rest of the application or the general window unless it is directly relevant to the snippet.
+- NEVER use placeholders like "CODE_BLOCK_N". Write out all code inside triple backticks.
+"""
 
         return f"""You are CORA, a desktop AI assistant. You have full visibility of the user's screen.
 
@@ -273,7 +285,7 @@ CRITICAL RULES:
         return messages
 
     # ── LLM calls ────────────────────────────────────────────────────────
-    def _call_llm(self, prompt: str, image: bytes = None) -> str:
+    def _call_llm(self, prompt: str, image: bytes = None, temperature: float = 0.7) -> str:
         if not self._client:
             return ""
         try:
@@ -285,19 +297,41 @@ CRITICAL RULES:
                     contents.append({'mime_type': 'image/png', 'data': image})
 
             if self._sdk == "new":
+                config = self._types.GenerateContentConfig(
+                    temperature       = temperature,
+                    max_output_tokens = 1024,
+                    safety_settings   = [
+                        self._types.SafetySetting(category="HARM_CATEGORY_HARASSMENT", threshold="BLOCK_NONE"),
+                        self._types.SafetySetting(category="HARM_CATEGORY_HATE_SPEECH", threshold="BLOCK_NONE"),
+                        self._types.SafetySetting(category="HARM_CATEGORY_SEXUALLY_EXPLICIT", threshold="BLOCK_NONE"),
+                        self._types.SafetySetting(category="HARM_CATEGORY_DANGEROUS_CONTENT", threshold="BLOCK_NONE"),
+                    ]
+                )
                 response = self._client.models.generate_content(
                     model    = self._model,
                     contents = contents,
+                    config   = config,
                 )
                 return response.text.strip()
             else:
-                response = self._client.generate_content(contents)
+                # Old SDK fallback
+                safety = [
+                    {'category': 'HARM_CATEGORY_HARASSMENT', 'threshold': 'BLOCK_NONE'},
+                    {'category': 'HARM_CATEGORY_HATE_SPEECH', 'threshold': 'BLOCK_NONE'},
+                    {'category': 'HARM_CATEGORY_SEXUALLY_EXPLICIT', 'threshold': 'BLOCK_NONE'},
+                    {'category': 'HARM_CATEGORY_DANGEROUS_CONTENT', 'threshold': 'BLOCK_NONE'},
+                ]
+                response = self._client.generate_content(
+                    contents,
+                    generation_config = {'temperature': temperature, 'max_output_tokens': 1024},
+                    safety_settings   = safety
+                )
                 return response.text.strip()
         except Exception as e:
             print(f"Gemini call error: {e}")
             return ""
 
-    def _stream_llm(self, messages: list, image: bytes = None) -> None:
+    def _stream_llm(self, messages: list, image: bytes = None, temperature: float = 0.7) -> None:
         if not self._client:
             self.stream_chunk.emit("AI engine not initialized.")
             self.stream_done.emit()
@@ -325,7 +359,7 @@ CRITICAL RULES:
                     contents = contents,
                     config   = self._types.GenerateContentConfig(
                         max_output_tokens = 4096,
-                        temperature       = 0.7,
+                        temperature       = temperature,
                         safety_settings   = [
                             self._types.SafetySetting(
                                 category="HARM_CATEGORY_HARASSMENT",

@@ -43,6 +43,11 @@ class Context:
             ""
         )
 
+    def identity_hash(self) -> int:
+        """Create a unique hash representing the visual 'state' of this context."""
+        # Include window title to prevent collisions between different apps with same/empty text
+        return hash((self.app, self.window_title, self.best_text().strip(), self.activity))
+
 
 class ContextExtractor:
     """Converts raw event data into Context objects asynchronously."""
@@ -107,10 +112,14 @@ class ContextExtractor:
             app, mode = 'browser', 'web'
         elif any(k in tl for k in ['word', '.docx', 'document']):
             app, mode = 'word', 'writing'
-        elif any(k in tl for k in ['code', 'vscode', 'pycharm', '.py', '.js']):
+        elif any(k in tl for k in ['notepad', 'sublime', 'text editor', 'edit']):
+             app, mode = 'text_editor', 'coding'
+        elif any(k in tl for k in ['code', 'vscode', 'pycharm', 'intellij', 'studio', '.py', '.js', '.ts', '.html', '.css', '.go', '.rs']):
             app, mode = 'editor', 'coding'
         elif 'claude' in tl:
             app, mode = 'claude', 'ai'
+        elif 'terminal' in tl or 'powershell' in tl or 'cmd.exe' in tl:
+            app, mode = 'terminal', 'terminal'
         elif not title or any(k in tl for k in ['taskbar', 'system tray', 'desktop', 'program manager']):
             app, mode = 'idle', 'general'
         else:
@@ -118,18 +127,57 @@ class ContextExtractor:
 
         file_path = None
         url = None
+        page_title = title
+        
         import re
-        if app == 'editor':
-            match = re.search(r'([a-zA-Z0-9_\-/\\]+\.[a-zA-Z0-9]{1,5})', title)
+        
+        # Refined parsing for better specificity
+        # TRY FILENAME EXTRACTION FOR ALL APPS (especially editors/writing)
+        if app in ('editor', 'text_editor', 'word', 'general'):
+            # More robust regex: look for words with extensions. 
+            # Avoid picking up full sentences by limiting length and character set.
+            # Example: main.py, setup.py, document.docx, README.md, script.js
+            match = re.search(r'([a-zA-Z0-9_\-]+\.[a-zA-Z0-9]{1,5})\b', title)
             if match:
                 file_path = match.group(1)
-        if app == 'browser':
+                page_title = file_path
+        
+        if app == 'youtube':
+            # Titles usually: "Video Name - YouTube" or "YouTube - Video Name"
+            parts = re.split(r'\s*[-—|]\s*', title)
+            if len(parts) > 1:
+                if 'youtube' in parts[-1].lower():
+                    page_title = " — ".join(parts[:-1])
+                elif 'youtube' in parts[0].lower():
+                    page_title = " — ".join(parts[1:])
+        
+        elif app == 'browser':
+            # Try to catch domain
             match = re.search(r'([a-z0-9]+([\-.][a-z0-9]+)*\.[a-z]{2,5})', tl)
             if match:
                 url = match.group(1)
+            
+            # Extract specific content from title
+            parts = re.split(r'\s*[-—|]\s*', title)
+            if len(parts) > 1:
+                # Common pattern: Page Title - Site Name - Browser
+                # or: Search Query - Google Search
+                site_found = False
+                for i, part in enumerate(reversed(parts)):
+                    pl = part.lower()
+                    if any(b in pl for b in ['chrome', 'firefox', 'edge', 'google search', 'new tab']):
+                        continue
+                    if not site_found:
+                        site_found = True
+                        # This might be the site name, skip it for page title if there are more parts
+                        if i < len(parts) - 1:
+                            continue
+                    
+                # Clean up: remove "Google Search" etc.
+                clean_parts = [p for p in parts if not any(x in p.lower() for x in ['google search', 'chrome', 'edge', 'firefox', 'new tab'])]
+                if clean_parts:
+                    page_title = " — ".join(clean_parts)
 
-        page_title = title.split(' - ')[0] if ' - ' in title else title
-        
         return {
             "app": app,
             "mode": mode,
@@ -211,22 +259,28 @@ class ContextExtractor:
         text = (context.get("visible_text") or "").lower()
         title = (context.get("window_title") or "").lower()
         app = (context.get("app") or "").lower()
+        page_title = (context.get("page_title") or "").lower()
 
         if not title or any(k in title for k in ['taskbar', 'system tray', 'desktop', 'program manager']):
             return "idle"
-        if "youtube" in title or "youtube" in app or "watch" in title:
+        
+        # Specific search detection
+        if "google search" in title or "search?" in (context.get("url") or ""):
+            return "searching_topic"
+            
+        if app == "youtube" or "watch" in title:
             return "watching_video"
         if "github" in text or "github" in title:
             return "browsing_repo"
-        if any(k in text for k in ["error", "traceback", "exception", "failed"]):
+        if any(k in text for k in ["error", "traceback", "exception", "failed", "syntaxerror"]):
             return "debugging_error"
-        if any(k in title for k in [".py", ".js", ".ts", "code", "editor", "pycharm"]):
+        if app == "editor" or any(k in title for k in [".py", ".js", ".ts", "code", "editor", "pycharm"]):
             return "coding"
         if any(k in text for k in ["what is", "overview", "learn", "how to"]):
             return "reading_article"
         if any(k in title for k in ["whatsapp", "telegram", "discord", "slack"]):
             return "chatting"
-        if any(x in title for x in ["word", ".docx", "document"]):
+        if app == "word" or any(x in title for x in ["word", ".docx", "document"]):
             return "writing_document"
         if ".pdf" in title:
             return "reading_pdf"

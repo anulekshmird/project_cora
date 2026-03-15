@@ -12,10 +12,10 @@ from context_extractor import Context
 
 # Expiry times in seconds
 EXPIRY = {
-    'selection': 5.0,
-    'region':    30.0,
+    'selection': 3600, # 1 hour (persist until window change)
+    'region':    3600, # 1 hour (persist until window change)
     'ocr':       10.0,
-    'window':    20.0,
+    'window':    15.0,
 }
 
 
@@ -38,11 +38,21 @@ class ContextManager(QObject):
         """Receive a new context and apply priority rules."""
         with self._lock:
             if ctx.source == 'window':
-                # Window change resets selection and region
-                self._window_ctx    = ctx
-                self._selection_ctx = Context()
-                self._region_ctx    = Context()
-                print(f"ContextManager: Window → {ctx.window_title[:50]}")
+                # Only clear selection/region if the window actually CHANGED
+                # A heartbeat update of the same window should NOT wipe the region
+                window_changed = (
+                    ctx.window_title != self._window_ctx.window_title or
+                    ctx.app != self._window_ctx.app
+                )
+                
+                self._window_ctx = ctx
+                if window_changed:
+                    self._selection_ctx = Context()
+                    self._region_ctx    = Context()
+                    print(f"ContextManager: Window CHANGED → {ctx.window_title[:50]}")
+                else:
+                    # Just a heartbeat update
+                    pass
 
             elif ctx.source == 'selection':
                 self._selection_ctx = ctx
@@ -80,8 +90,9 @@ class ContextManager(QObject):
             bool(self._selection_ctx.selected_text) and
             (now - self._selection_ctx.timestamp) < EXPIRY['selection']
         )
+        # For regions, we check both image and selected_text (OCR result)
         reg_valid = (
-            bool(self._region_ctx.visible_text or self._region_ctx.image) and
+            bool(self._region_ctx.selected_text or self._region_ctx.image) and
             (now - self._region_ctx.timestamp) < EXPIRY['region']
         )
 
@@ -93,7 +104,7 @@ class ContextManager(QObject):
                 mode         = base.mode,
                 window_title = base.window_title,
                 selected_text= self._selection_ctx.selected_text,
-                visible_text = base.visible_text,
+                visible_text = "", # suppress window text for narrow focus
                 url          = base.url,
                 page_title   = base.page_title,
                 file_path    = base.file_path,
@@ -103,15 +114,18 @@ class ContextManager(QObject):
                 timestamp    = self._selection_ctx.timestamp,
             )
         elif reg_valid:
+            # IMPORTANT: For regional selection, visibility should be LIMITED 
+            # to the picked area (stored in selected_text by extractor)
             merged = Context(
                 app          = base.app,
                 mode         = base.mode,
                 window_title = base.window_title,
-                selected_text= "",
-                visible_text = self._region_ctx.visible_text,
+                selected_text= self._region_ctx.selected_text,
+                visible_text = "", # suppress whole-page OCR for regional focus
                 image        = self._region_ctx.image,
                 url          = base.url,
                 page_title   = base.page_title,
+                file_path    = base.file_path,
                 activity     = base.activity,
                 needs        = base.needs,
                 source       = 'region',
@@ -135,8 +149,8 @@ class ContextManager(QObject):
                     self._selection_ctx = Context()
                     changed = True
                     print("ContextManager: Selection expired.")
-                if (self._region_ctx.visible_text and
-                        (now - self._region_ctx.timestamp) > EXPIRY['region']):
+                if (self._region_ctx.selected_text or self._region_ctx.image) and \
+                        (now - self._region_ctx.timestamp) > EXPIRY['region']:
                     self._region_ctx = Context()
                     changed = True
                     print("ContextManager: Region expired.")

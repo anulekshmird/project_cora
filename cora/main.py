@@ -1,4 +1,5 @@
 import sys
+import os
 import threading
 from PyQt6.QtWidgets import QApplication, QSystemTrayIcon, QMenu
 from PyQt6.QtGui import QIcon, QAction
@@ -29,6 +30,8 @@ class ShortcutListener(QObject):
     
     def __init__(self):
         super().__init__()
+        self._last_ctrl_time = 0
+        self._tap_count = 0
         
     def start(self):
         if keyboard:
@@ -37,11 +40,40 @@ class ShortcutListener(QObject):
                 keyboard.add_hotkey('ctrl+shift+q', self.on_hotkey)
                 # Register Ctrl+Shift+E to exit app
                 keyboard.add_hotkey('ctrl+shift+e', self.on_exit_hotkey)
-                # Register Ctrl+Shift+P to pick element
-                keyboard.add_hotkey('ctrl+shift+p', self.on_pick_hotkey)
-                print("Global Shortcuts Registered: Ctrl+Shift+Q (Toggle), Ctrl+Shift+E (Exit), Ctrl+Shift+P (Pick)")
+                
+                # Use on_press for double-tap detection (more reliable than hook on some systems)
+                keyboard.on_press(self._on_key_event)
+                
+                print("Global Shortcuts Registered: Double-tap Ctrl (Pick), Ctrl+Shift+Q (Chat), Ctrl+Shift+E (Exit)")
+                print("--- Keyboard Listener Active ---")
             except Exception as e:
                 print(f"Failed to register hotkey: {e}")
+
+    def _on_key_event(self, event):
+        
+        if 'ctrl' in event.name.lower():
+            import time
+            now = time.time()
+            
+            # Avoid repeat-bounce (if user holds key)
+            if (now - self._last_ctrl_time) < 0.1:
+                return
+
+            if (now - self._last_ctrl_time) < 0.5: # 500ms window
+                self._tap_count += 1
+            else:
+                self._tap_count = 1
+            
+            self._last_ctrl_time = now
+            print(f"DEBUG: Ctrl detected (Count={self._tap_count})")
+            
+            if self._tap_count >= 2:
+                print("[HOTKEY] DOUBLE-TAP CTRL TRIGGERED!")
+                self._tap_count = 0
+                self.pick_triggered.emit()
+        else:
+            # If any other key is pressed between taps, reset
+            self._tap_count = 0
                 
     def on_hotkey(self):
         self.activated.emit()
@@ -114,6 +146,7 @@ class CoraApp(QObject):
         self.bubble.dismissed.connect(self._on_dismissed)
         self.bubble.ask_cora_clicked.connect(self._on_chip_clicked)
         self.bubble.pick_requested.connect(self.start_pick_to_ask)
+        self.bubble.refresh_requested.connect(self.handle_manual_refresh)
 
         # Chat window → AI engine
         self.chat_win.send_message_signal.connect(self._on_chat_message_sent)
@@ -169,7 +202,8 @@ class CoraApp(QObject):
         
         # Heartbeat state
         self._last_suggestion_window = ""
-        self._suggestion_cooldown    = 10.0  # Reduced for more responsive heartbeat
+        self._suggestion_cooldown    = 2.0  # seconds between background suggestions
+        self._last_context_hash      = None
         self._last_suggestion_time   = 0
         
         # 1. STARTUP: Enter Idle Mode
@@ -178,7 +212,7 @@ class CoraApp(QObject):
 
         # Heartbeat timer for periodic suggestions
         self._obs_timer = QTimer(self.app)
-        self._obs_timer.setInterval(10000)  # 10 seconds
+        self._obs_timer.setInterval(5000)  # 5 seconds
         self._obs_timer.timeout.connect(self._observe_tick)
         
         # Delay start until event loop is running (FIX 1)
@@ -222,6 +256,14 @@ class CoraApp(QObject):
             ctx = self.ctx_manager.get()
             self.chat_win.update_mode_indicator(ctx.mode)
 
+    def handle_manual_refresh(self):
+        print("[PIPELINE] Manual refresh requested.")
+        # Reset cooldowns and clear last window to force immediate tick
+        self._last_suggestion_time = 0
+        self._last_suggestion_window = ""
+        # Trigger immediate observe tick
+        self._observe_tick()
+
     def _on_chat_closed(self):
         print("Chat closed — resuming suggestions.")
         # Reset cooldown so next tick fires immediately
@@ -253,15 +295,18 @@ class CoraApp(QObject):
         self.chat_win.update_mode_indicator(ctx.app, activity=ctx.activity)
         
         # Update Proactive Bubble idle status
-        if hasattr(self.bubble, 'set_context_status'):
+        if hasattr(self, 'bubble') and hasattr(self.bubble, 'set_context_status'):
             self.bubble.set_context_status(ctx)
-            # Ensure bubble stays visible
-            if not self.chat_win.isVisible():
+            
+            # Ensure bubble stays visible but don't force show every time (causes flickering)
+            if not self.chat_win.isVisible() and not self.bubble.isVisible():
                 self.bubble.show()
-                # ONLY enter idle mode if we are NOT currently showing a suggestion or regional info
-                # This prevents the bubble from "dismissing soon" on every mouse move/window event
-                if self.bubble.orb_state == self.bubble.STATE_IDLE:
-                    self.bubble.enter_idle_mode()
+
+            # ONLY enter idle mode if we are NOT currently showing a suggestion or regional info
+            is_region = (ctx.source == 'region')
+            if self.bubble.orb_state == self.bubble.STATE_IDLE and not self.bubble.is_expanded and not is_region:
+                 # Check if we should actually re-enter idle mode (layout might need refresh)
+                 pass 
         
         # Force label for idle state
         if ctx.activity == 'idle':
@@ -294,6 +339,27 @@ class CoraApp(QObject):
             print(f"[SWITCH] → {title[:60]}")
             self._last_suggestion_window = title
             self._last_suggestion_time   = 0  # reset cooldown
+
+            # IMMEDIATE: Perform a shallow update so chips work right away
+            # This doesn't wait for OCR
+            shallow_enrich = self.ctx_extractor._classify_and_enrich(title)
+            from context_extractor import Context
+            shallow_ctx = Context(
+                app          = shallow_enrich['app'],
+                mode         = shallow_enrich['mode'],
+                window_title = title,
+                page_title   = shallow_enrich['page_title'],
+                file_path    = shallow_enrich['file_path'],
+                url          = shallow_enrich['url'],
+                activity     = self.ctx_extractor.infer_user_activity({
+                    "app": shallow_enrich['app'], 
+                    "window_title": title,
+                    "page_title": shallow_enrich['page_title']
+                }),
+                source       = 'window',
+                timestamp    = time.time()
+            )
+            self.ctx_manager.update(shallow_ctx)
 
             # Show instant app-specific chips immediately
             self._show_instant_chips(title)
@@ -328,58 +394,42 @@ class CoraApp(QObject):
             match = re.search(r'([a-zA-Z0-9_\-\s]+\.docx?)', title)
             fname = match.group(1) if match else "document"
             doing = f"Writing {fname}"
-            chips = [
-                {"label": "Fix Grammar",   "hint": f"Fix grammar in the document"},
-                {"label": "Improve",       "hint": f"Improve clarity of the text"},
-                {"label": "Summarize",     "hint": f"Summarize the document"},
-            ]
-        elif any(k in tl for k in ['chrome', 'edge', 'firefox', 'opera']):
+        elif any(k in tl for k in ['chrome', 'edge', 'firefox', 'opera', 'brave']):
             app_name = "Web Browser"
             if "youtube" in tl: app_name = "YouTube"
             elif "github" in tl: app_name = "GitHub"
             elif "whatsapp" in tl: app_name = "WhatsApp"
             
-            # Extract cleaner page title
+            # Use smarter parsing for page title
             parts = re.split(r'\s*[-—|]\s*', title)
             clean_page = parts[0] if parts else ""
-            skip_titles = ['google chrome', 'new tab', 'untitled', 'google search', 'youtube', 'microsoft edge', 'mozilla firefox', 'brave', 'opera']
-            if not clean_page or any(s in clean_page.lower() for s in skip_titles):
-                doing = "Browsing web content"
-            else:
-                doing = f"Reading: {clean_page}"
             
-            chips = [
-                {"label": "Summarize",     "hint": "Summarize this page"},
-                {"label": "Key Points",    "hint": "List key points from this page"},
-                {"label": "Explain",       "hint": "Explain the main topic"},
-            ]
-        elif any(k in tl for k in ['code', 'vscode', '.py', '.js', '.ts']):
+            # If it's a search
+            if "google search" in tl:
+                doing = f"Searching: {clean_page}"
+            elif "youtube" in tl:
+                if len(parts) > 1 and "youtube" in parts[-1].lower():
+                    doing = f"Watching: {' - '.join(parts[:-1])}"
+                else:
+                    doing = "Watching video"
+            elif "github" in tl:
+                doing = f"Browsing: {clean_page}"
+            else:
+                skip_titles = ['google chrome', 'new tab', 'untitled', 'google search', 'youtube', 'microsoft edge', 'mozilla firefox', 'brave', 'opera']
+                if not clean_page or any(s in clean_page.lower() for s in skip_titles):
+                    doing = "Browsing web content"
+                else:
+                    doing = f"Reading: {clean_page}"
+        elif any(k in tl for k in ['code', 'vscode', 'pycharm', '.py', '.js', '.ts', '.html', '.css']):
             app_name = "VS Code" if ("code" in tl or "vscode" in tl) else "Code Editor"
             match = re.search(r'([a-zA-Z0-9_\-]+\.[a-z]{1,4})', title)
             fname = match.group(1) if match else "source file"
             doing = f"Editing {fname}"
-            chips = [
-                {"label": "Review Code",   "hint": "Review the visible code"},
-                {"label": "Find Bugs",     "hint": "Find bugs in this code"},
-                {"label": "Explain Code",  "hint": "Explain what this code does"},
-            ]
-        elif any(k in tl for k in ['youtube', 'youtu.be']):
-            app_name = "YouTube"
-            doing = "Watching video"
-            chips = [
-                {"label": "Summarize",     "hint": "Summarize this video"},
-                {"label": "Key Points",    "hint": "Key points from this video"},
-            ]
         elif '.pdf' in tl:
             app_name = "PDF Reader"
             match = re.search(r'([a-zA-Z0-9_\-\s]+\.pdf)', title)
             fname = match.group(1) if match else "document"
             doing = f"Reading {fname}"
-            chips = [
-                {"label": "Summarize PDF", "hint": "Summarize this PDF"},
-                {"label": "Key Points",    "hint": "Extract key points"},
-                {"label": "Explain",       "hint": "Explain the content"},
-            ]
         elif app_name == "idle" or not title or any(k in tl for k in ['taskbar', 'system tray', 'desktop', 'program manager']):
             app_name = "Desktop"
             doing    = "Resting"
@@ -444,7 +494,15 @@ class CoraApp(QObject):
         window_changed  = (current_window != self._last_suggestion_window)
         cooldown_ok     = (now - self._last_suggestion_time) > self._suggestion_cooldown
 
-        if not window_changed and not cooldown_ok:
+        if not window_changed:
+            # ONLY trigger periodic updates if the window changed.
+            # This prevents Cora from constantly refreshing on the same page.
+            return
+
+        # Window CHANGED: Reset stability hash to ensure we get a fresh analysis for the new page
+        self._last_context_hash = None
+
+        if not cooldown_ok:
             return
 
         # Don't trigger background suggestions if user is looking at a current suggestion or picked region
@@ -471,10 +529,10 @@ class CoraApp(QObject):
         self._suggestion_ready_signal.emit(ctx)
 
     def _generate_suggestion_for_ctx(self, ctx):
-        print(f"[PIPELINE] Generating: app={ctx.app} text={len(ctx.best_text())}ch")
+        # Silence verbose background extraction logs
+        # print(f"[PIPELINE] Generating: app={ctx.app} text={len(ctx.best_text())}ch")
 
         if self.chat_win.isVisible():
-            print("[PIPELINE] Chat open — skipping")
             return
 
         hard_skip = ('antigravity',)
@@ -487,6 +545,18 @@ class CoraApp(QObject):
             ctx.visible_text = f"Active window: {ctx.window_title}"
             best = ctx.visible_text
 
+        # Synchronously sync to ContextManager so it can purge stale state (like old regions)
+        # We do this BEFORE any skips so the State of Cora is always accurate to the Screen.
+        self.ctx_manager.update(ctx)
+
+        # Content Stability Check
+        curr_hash = ctx.identity_hash()
+        is_region = (ctx.source == 'region')
+        
+        if curr_hash == self._last_context_hash and not is_region:
+            print(f"[SUGGEST] Skipping — content unchanged (hash={curr_hash})")
+            return
+            
         if not best:
             if ctx.source == 'region':
                 print("[PIPELINE] No text but regional selection — proceeding with image")
@@ -495,8 +565,21 @@ class CoraApp(QObject):
                 print("[PIPELINE] No content — skipping")
                 return
 
-        print(f"[SUGGEST] ✓ Calling AI for app={ctx.app} text={len(best)}ch")
-        self.ctx_manager.update(ctx)
+        # If we are currently showing a specific regional suggestion, 
+        # DO NOT let background window heartbeats overwrite it.
+        # BUT if THIS call is regional (user just picked something), proceed ALWAYS.
+        is_background = (ctx.source == 'window')
+        current_bubble_win = self.bubble.current_data.get('window_title') if self.bubble.current_data else ""
+        is_showing_region = (self.bubble.current_data and self.bubble.current_data.get('type') == 'picked_suggestion')
+        
+        # If showing a region, ONLY skip background heartbeats if it's the SAME window.
+        # If the user switched windows, we MUST proceed to show the new window's context.
+        if is_background and is_showing_region and ctx.window_title == current_bubble_win:
+            # Update window title metadata without changing the actual content
+            return
+
+        print(f"[SUGGEST] ✓ Calling AI for app={ctx.app} text={len(best)}ch (hash={curr_hash})")
+        self._last_context_hash = curr_hash
         self.ai_engine.generate_suggestion_async(ctx)
 
     def _on_suggestion_ready(self, payload: dict):
@@ -608,11 +691,29 @@ class CoraApp(QObject):
 
     def on_region_picked(self, x, y, image_bytes, ocr_text):
         from system_observer import SystemEvent
-        print(f"Pick to Ask: Picked at ({x},{y}), OCR={len(ocr_text)}ch")
-        self.bubble.show()
-
-        # Feed into Layer 1 → triggers full pipeline (which leads to AI suggestion)
-        self.sys_observer.emit_region(x, y, image_bytes, ocr_text)
+        from context_extractor import Context
+        import time
+        # show_suggestion handles visibility internally
+        
+        # IMMEDIATE: Sync regional context to ContextManager so chips work right away
+        base = self.ctx_manager.get()
+        reg_ctx = Context(
+            app           = base.app,
+            mode          = base.mode,
+            window_title  = base.window_title,
+            page_title    = base.page_title,
+            file_path     = base.file_path,
+            url           = base.url,
+            selected_text = ocr_text,
+            image         = image_bytes,
+            source        = 'region',
+            timestamp     = time.time()
+        )
+        self.ctx_manager.update(reg_ctx)
+        
+        # Directly trigger AI analysis with this enriched context
+        # Skip going back through sys_observer to avoid a redundant/weaker loop
+        self._generate_suggestion_for_ctx(reg_ctx)
 
         # Show immediate "Analyzing..." state
         clean_text = " ".join(ocr_text.split())
@@ -624,16 +725,16 @@ class CoraApp(QObject):
 
         payload = {
             "type":           "picked_suggestion",
-            "reason":         f"<b>You’re in:</b> Screen Snipper<br><b>Looks like:</b> {display_text}",
+            "app":            self.ctx_manager.get().app,
+            "activity":       "analyzing_region",
+            "reason":         f"Analyzing: {display_text}",
             "reason_long":    "Cora is analyzing the selected region to provide specific suggestions.",
             "confidence":     1.0,
             "suggestions":    [{"label": "Analyzing...", "hint": "Please wait while Cora thinks..."}],
             "window_title":   self.ctx_manager.get().window_title,
-            "app":            self.ctx_manager.get().app,
             "source":         "region",
         }
-        # Force show bubble instantly
-        self.bubble.show()
+        
         QTimer.singleShot(0, lambda: self.bubble.show_suggestion(payload))
 
     def on_pick_cancelled(self):

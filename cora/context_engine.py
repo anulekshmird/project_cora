@@ -469,30 +469,31 @@ class ContextEngine:
         }
 
         # ── Developer: file + syntax check ───────────────────────────
-        if mode_primary == "developer":
+        if mode_primary in ("developer", "document"):
             active_file_candidate = None
-            parts = lower.split(' ')
-            for part in parts:
-                clean_part = part.strip(" ●*•[]()")
-                if any(clean_part.endswith(ext) for ext in [
-                    '.py', '.js', '.ts', '.html', '.css', '.java', '.c', '.cpp',
-                ]):
-                    search_paths = [self.workspace_path]
-                    parent_dir   = os.path.dirname(self.workspace_path)
-                    if os.path.basename(self.workspace_path) in ['cora', 'src', 'app']:
-                        search_paths.append(parent_dir)
+            if mode_primary == "developer":
+                parts = lower.split(' ')
+                for part in parts:
+                    clean_part = part.strip(" ●*•[]()")
+                    if any(clean_part.endswith(ext) for ext in [
+                        '.py', '.js', '.ts', '.html', '.css', '.java', '.c', '.cpp',
+                    ]):
+                        search_paths = [self.workspace_path]
+                        parent_dir   = os.path.dirname(self.workspace_path)
+                        if os.path.basename(self.workspace_path) in ['cora', 'src', 'app']:
+                            search_paths.append(parent_dir)
 
-                    found = False
-                    for search_path in search_paths:
-                        for root, _, files in os.walk(search_path):
-                            if clean_part in files:
-                                active_file_candidate = os.path.join(root, clean_part)
-                                found = True
+                        found = False
+                        for search_path in search_paths:
+                            for root, _, files in os.walk(search_path):
+                                if clean_part in files:
+                                    active_file_candidate = os.path.join(root, clean_part)
+                                    found = True
+                                    break
+                            if found:
                                 break
-                        if found:
+                        if active_file_candidate:
                             break
-                    if active_file_candidate:
-                        break
 
             last_file = (
                 self.active_buffer_path or
