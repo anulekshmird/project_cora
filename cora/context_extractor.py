@@ -98,50 +98,63 @@ class ContextExtractor:
                 timestamp    = data.get('timestamp', time.time()),
             )
 
+    def _classify_and_enrich(self, title: str) -> dict:
+        tl = title.lower()
         # Classify app and mode
         if any(k in tl for k in ['youtube', 'video', 'watch']):
-            app  = 'youtube'
-            mode = 'video'
+            app, mode = 'youtube', 'video'
         elif any(k in tl for k in ['chrome', 'firefox', 'edge', 'browser']):
-            app  = 'browser'
-            mode = 'web'
+            app, mode = 'browser', 'web'
         elif any(k in tl for k in ['word', '.docx', 'document']):
-            app  = 'word'
-            mode = 'writing'
+            app, mode = 'word', 'writing'
         elif any(k in tl for k in ['code', 'vscode', 'pycharm', '.py', '.js']):
-            app  = 'editor'
-            mode = 'coding'
+            app, mode = 'editor', 'coding'
         elif 'claude' in tl:
-            app  = 'claude'
-            mode = 'ai'
+            app, mode = 'claude', 'ai'
         elif not title or any(k in tl for k in ['taskbar', 'system tray', 'desktop', 'program manager']):
-            app  = 'idle'
-            mode = 'general'
+            app, mode = 'idle', 'general'
         else:
-            app  = 'general'
-            mode = 'general'
-        
-        # Heuristic extraction for file path and URL
+            app, mode = 'general', 'general'
+
         file_path = None
         url = None
-        
+        import re
         if app == 'editor':
-            import re
-            # Try to find something that looks like a filename or path
-            # matches: file.py, path/to/file.js, [path], etc.
             match = re.search(r'([a-zA-Z0-9_\-/\\]+\.[a-zA-Z0-9]{1,5})', title)
             if match:
                 file_path = match.group(1)
-        
         if app == 'browser':
-            import re
-            # Extract domain-like patterns from title
-            # matches: example.com, sub.domain.org, etc.
             match = re.search(r'([a-z0-9]+([\-.][a-z0-9]+)*\.[a-z]{2,5})', tl)
             if match:
                 url = match.group(1)
+
+        page_title = title.split(' - ')[0] if ' - ' in title else title
         
-        print(f"DEBUG: Classified window '{title}' as app='{app}' mode='{mode}' file='{file_path}' url='{url}'")
+        return {
+            "app": app,
+            "mode": mode,
+            "file_path": file_path,
+            "url": url,
+            "page_title": page_title
+        }
+
+    def _from_window(self, data: dict) -> Context:
+        title = data.get('window_title', '')
+        use_window_only = data.get('use_window_capture', False)
+
+        enrich = self._classify_and_enrich(title)
+        app = enrich['app']
+        mode = enrich['mode']
+        
+        # Skip OCR entirely for Claude/AI windows
+        if app == 'claude':
+            return Context(
+                app          = 'claude',
+                mode         = 'ai',
+                window_title = title,
+                source       = 'window',
+                timestamp    = data.get('timestamp', time.time()),
+            )
 
         # Run OCR asynchronously for visible_text
         visible_text = ""
@@ -185,11 +198,11 @@ class ContextExtractor:
             mode         = mode,
             window_title = title,
             visible_text = visible_text,
-            page_title   = page_title,
+            page_title   = enrich['page_title'],
             activity     = activity,
             needs        = needs,
-            url          = url,
-            file_path    = file_path,
+            url          = enrich['url'],
+            file_path    = enrich['file_path'],
             source       = 'window',
             timestamp    = data.get('timestamp', time.time()),
         )
@@ -288,11 +301,27 @@ class ContextExtractor:
         )
 
     def _from_region(self, data: dict) -> Context:
+        import pygetwindow as gw
+        title = ""
+        try:
+            win = gw.getActiveWindow()
+            title = win.title.strip() if win else ""
+        except Exception:
+            pass
+        
+        enrich = self._classify_and_enrich(title)
+        
         return Context(
-            visible_text = data.get('ocr_text', ''),
-            image        = data.get('image'),
-            source       = 'region',
-            timestamp    = data.get('timestamp', time.time()),
+            app           = enrich['app'],
+            mode          = enrich['mode'],
+            window_title  = title,
+            page_title    = enrich['page_title'],
+            file_path     = enrich['file_path'],
+            url           = enrich['url'],
+            selected_text = data.get('ocr_text', ''),
+            image         = data.get('image'),
+            source        = 'region',
+            timestamp     = data.get('timestamp', time.time()),
         )
 
 

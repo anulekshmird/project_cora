@@ -126,8 +126,7 @@ class ProactiveBubble(QWidget):
         self.setWindowFlags(
             Qt.WindowType.FramelessWindowHint |
             Qt.WindowType.Tool |
-            Qt.WindowType.WindowStaysOnTopHint |
-            Qt.WindowType.WindowDoesNotAcceptFocus
+            Qt.WindowType.WindowStaysOnTopHint
         )
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
@@ -139,9 +138,8 @@ class ProactiveBubble(QWidget):
         self.orb_state             = self.STATE_IDLE
         self._pending_data         = None  # queued suggestion during fade-out
 
-        # No auto-dismiss — bubble stays until user clicks Dismiss
+        # No auto-dismiss — bubble stays until user clicks Dismiss or context changes
         self._dismiss_timer = QTimer(self)
-        self._dismiss_timer.timeout.connect(self._on_auto_dismiss_tick)
         self.is_hovered = False
 
         self.screen_geo            = QApplication.primaryScreen().availableGeometry()
@@ -239,10 +237,10 @@ class ProactiveBubble(QWidget):
 
         self.opacity_effect = QGraphicsOpacityEffect(self)
         self.setGraphicsEffect(self.opacity_effect)
-        self.opacity_effect.setOpacity(0.0)
+        self.opacity_effect.setOpacity(1.0) # Always visible by default
 
         self.anim = QPropertyAnimation(self.opacity_effect, b"opacity")
-        self.anim.setDuration(300)
+        self.anim.setDuration(200) # Faster transition
 
         self._pulse_timer = QTimer(self)
         self._pulse_timer.timeout.connect(self._pulse_tick)
@@ -431,12 +429,17 @@ class ProactiveBubble(QWidget):
         app_name = APP_LABELS.get(app, app.capitalize())
         
         # Build "Doing" part
+        page_title = getattr(ctx_data, 'page_title', None)
         if activity == "coding" and file_path:
             doing = f"Editing {file_path}"
         elif activity == "writing_document" and file_path:
             doing = f"Writing {file_path}"
         elif activity == "reading_pdf" and file_path:
             doing = f"Reading {file_path}"
+        elif activity == "reading_article" and page_title:
+            doing = f"Reading: {page_title}"
+        elif activity == "watching_video" and page_title:
+            doing = f"Watching: {page_title}"
         else:
             doing = LABELS.get(activity, activity.replace('_', ' ').capitalize())
         
@@ -698,11 +701,15 @@ class ProactiveBubble(QWidget):
         self.show()
         self.raise_()
 
-        # Always animate fresh — never skip based on visibility
-        self.opacity_effect.setOpacity(0.0)
-        self.anim.setStartValue(0.0)
-        self.anim.setEndValue(1.0)
-        self.anim.start()
+        # Always show fresh — but no full fade from 0 if already visible
+        current_op = self.opacity_effect.opacity()
+        if current_op < 1.0:
+            self.anim.stop()
+            self.anim.setStartValue(current_op)
+            self.anim.setEndValue(1.0)
+            self.anim.start()
+        else:
+            self.opacity_effect.setOpacity(1.0)
 
         if suggestion_type == 'syntax_error':
             self._dismiss_timer.stop()
@@ -847,35 +854,19 @@ class ProactiveBubble(QWidget):
             QTimer.singleShot(100, lambda: self._show_suggestion_inner(self._pending_data))
 
     def hide_bubble(self):
-        """Only hide when explicitly dismissed by user."""
+        """Collapse panel but keep orb visible."""
         self.current_data = None
         self.is_expanded   = False
         self.panel.hide()
         self.update_layout_pos()
-        # Don't call self.hide() — keep bubble visible but collapsed
+        self.show()
 
     def fade_out(self, force=False):
-        if self.is_hovered and not force:
-            # Auto-dismiss disabled — user must click Dismiss
-            # self._dismiss_timer.start(2000)
-            pass
-            return
-        self.anim.stop()
-        try:
-            self.anim.finished.disconnect()
-        except Exception:
-            pass
-        self.anim.setStartValue(self.opacity_effect.opacity())
-        self.anim.setEndValue(0.0)
-        self.anim.finished.connect(self._on_fade_finished)
-        self.anim.start()
+        # We don't fade out anymore, we just enter idle mode (collapse)
+        self.enter_idle_mode()
 
     def _on_fade_finished(self):
-        try:
-            self.anim.finished.disconnect(self._on_fade_finished)
-        except Exception:
-            pass
-        self.enter_idle_mode()
+        pass
 
     # ── Action handlers ──────────────────────────────────────────────
 

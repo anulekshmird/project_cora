@@ -585,6 +585,9 @@ class ChatWindow(QMainWindow):
              # Emit signal to main.py
              self.set_generating_state(True)
              self.send_message_signal.emit(text, attachment)
+             
+             # Force focus back to input for next message
+             self.input_area.input_field.setFocus()
         
     def set_generating_state(self, is_generating):
         self.is_generating = is_generating

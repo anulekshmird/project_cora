@@ -189,17 +189,28 @@ class ScreenPicker(QWidget):
             import io
 
             with mss.mss() as sct:
-                # Get primary monitor to handle DPI scaling
+                # Get DPI ratio to convert logical coordinates (PyQt) to pixel coordinates (mss)
+                screen = QApplication.primaryScreen()
+                ratio  = screen.devicePixelRatio()
+                
+                # Get primary monitor to handle absolute offsets
                 monitor = sct.monitors[1]
+                
+                # Convert logical to physical pixels
+                rx = int(min(x1, x2) * ratio)
+                ry = int(min(y1, y2) * ratio)
+                rw = int(abs(x2 - x1) * ratio)
+                rh = int(abs(y2 - y1) * ratio)
+                
                 region = {
-                    "top":    max(0, int(min(y1, y2))),
-                    "left":   max(0, int(min(x1, x2))),
-                    "width":  max(20, int(abs(x2 - x1))),
-                    "height": max(20, int(abs(y2 - y1))),
+                    "top":    max(0, ry),
+                    "left":   max(0, rx),
+                    "width":  max(20, rw),
+                    "height": max(20, rh),
                 }
                 # Clamp to monitor bounds
-                region["width"]  = min(region["width"],  monitor["width"]  - region["left"])
-                region["height"] = min(region["height"], monitor["height"] - region["top"])
+                region["width"]  = min(region["width"],  monitor["width"]  - (region["left"] - monitor["left"]))
+                region["height"] = min(region["height"], monitor["height"] - (region["top"] - monitor["top"]))
 
                 sct_img = sct.grab(region)
                 img = Image.frombytes("RGB", sct_img.size, sct_img.bgra, "raw", "BGRX")

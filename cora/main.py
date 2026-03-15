@@ -255,9 +255,13 @@ class CoraApp(QObject):
         # Update Proactive Bubble idle status
         if hasattr(self.bubble, 'set_context_status'):
             self.bubble.set_context_status(ctx)
-            # Ensure bubble pops up immediately on context change
+            # Ensure bubble stays visible
             if not self.chat_win.isVisible():
                 self.bubble.show()
+                # ONLY enter idle mode if we are NOT currently showing a suggestion or regional info
+                # This prevents the bubble from "dismissing soon" on every mouse move/window event
+                if self.bubble.orb_state == self.bubble.STATE_IDLE:
+                    self.bubble.enter_idle_mode()
         
         # Force label for idle state
         if ctx.activity == 'idle':
@@ -335,7 +339,15 @@ class CoraApp(QObject):
             elif "github" in tl: app_name = "GitHub"
             elif "whatsapp" in tl: app_name = "WhatsApp"
             
-            doing = "Browsing web content"
+            # Extract cleaner page title
+            parts = re.split(r'\s*[-—|]\s*', title)
+            clean_page = parts[0] if parts else ""
+            skip_titles = ['google chrome', 'new tab', 'untitled', 'google search', 'youtube', 'microsoft edge', 'mozilla firefox', 'brave', 'opera']
+            if not clean_page or any(s in clean_page.lower() for s in skip_titles):
+                doing = "Browsing web content"
+            else:
+                doing = f"Reading: {clean_page}"
+            
             chips = [
                 {"label": "Summarize",     "hint": "Summarize this page"},
                 {"label": "Key Points",    "hint": "List key points from this page"},
@@ -433,8 +445,10 @@ class CoraApp(QObject):
         cooldown_ok     = (now - self._last_suggestion_time) > self._suggestion_cooldown
 
         if not window_changed and not cooldown_ok:
-            remaining = int(self._suggestion_cooldown - (now - self._last_suggestion_time))
-            print(f"[OBSERVE] Cooldown {remaining}s remaining")
+            return
+
+        # Don't trigger background suggestions if user is looking at a current suggestion or picked region
+        if self.bubble.orb_state != self.bubble.STATE_IDLE:
             return
 
         print(f"[OBSERVE] → Extracting context for: {current_window[:50]}")
@@ -474,8 +488,12 @@ class CoraApp(QObject):
             best = ctx.visible_text
 
         if not best:
-            print("[PIPELINE] No content — skipping")
-            return
+            if ctx.source == 'region':
+                print("[PIPELINE] No text but regional selection — proceeding with image")
+                best = ""
+            else:
+                print("[PIPELINE] No content — skipping")
+                return
 
         print(f"[SUGGEST] ✓ Calling AI for app={ctx.app} text={len(best)}ch")
         self.ctx_manager.update(ctx)
@@ -505,14 +523,6 @@ class CoraApp(QObject):
         # Send hint as the actual instruction to AI but show label in UI
         self.ai_engine.stream_chat_async(hint, ctx, history)
 
-    def _process_chat(self, text, attachment=None, proactive_context=None):
-        print("Processing chat in background (Streaming)...")
-        
-        # Legacy _process_chat kept for backward compatibility if needed, 
-        # but UI triggers now use self.ai_engine.stream_chat_async
-        self.chat_win.ai_response_signal.emit("") 
-        
-        # ... legacy streaming logic omitted for brevity as it's replaced by AI Engine ...
 
     # reset_chat removed (replaced by handle_new_chat)
 
@@ -551,49 +561,10 @@ class CoraApp(QObject):
         sessions = self.observer.get_sessions()
         self.chat_win.load_sessions(sessions)
 
-    def on_suggestion(self, payload):
-        print(f"Proactive Suggestion: {payload.get('reason')}")
-
-        # Pass the full payload to the bubble to render
-        QTimer.singleShot(0, lambda: self.bubble.show_suggestion(payload))
 
     def show_last_hint(self):
         self.bubble.show_message(self.last_title, self.last_details)
 
-    def handle_overlay_action(self, user_text, internal_prompt):
-        print(f"Overlay Action: {user_text}")
-
-        proactive_ctx = self.copilot.last_proactive_context or {}
-        reason = proactive_ctx.get("reason", "")
-        app_type = proactive_ctx.get("mode_primary", "general")
-        self.chat_win.update_mode_indicator(app_type, reason=reason)
-
-        # 1. Force Open Chat Window First (Avoid toggling closed if already open)
-        if not self.chat_win.isVisible():
-             self.open_chat()
-        else:
-             self.chat_win.activateWindow()
-             self.chat_win.raise_()
-
-        # Special Case: Welcome
-        # If the ID was "welcome" or prompt is empty, we stop here (Open Chat is done)
-        if internal_prompt == "welcome" or internal_prompt == "":
-            return
-
-        # 2. Add clean USER FRIENDLY message to UI (hide prompt details)
-        self.chat_win.add_user(user_text)
-        
-        # 3. Grab stored proactive context for grounded chat (FIX 7)
-        proactive_ctx = None
-        if hasattr(self, 'copilot') and self.copilot.last_proactive_context:
-            proactive_ctx = self.copilot.last_proactive_context
-            print(f"Grounding chat with proactive context: mode={proactive_ctx.get('mode_primary')}")
-        
-        # 4. Process the INTERNAL PROMPT in background
-        # FORCE BUTTON UPDATE
-        self.chat_win.set_generating_state(True)
-        t = threading.Thread(target=self._process_chat, args=(internal_prompt,), kwargs={'proactive_context': proactive_ctx})
-        t.start()
 
     def hide_ui_for_capture(self):
         # Store state
@@ -640,37 +611,23 @@ class CoraApp(QObject):
         print(f"Pick to Ask: Picked at ({x},{y}), OCR={len(ocr_text)}ch")
         self.bubble.show()
 
-        # Feed into Layer 1 → triggers full pipeline
+        # Feed into Layer 1 → triggers full pipeline (which leads to AI suggestion)
         self.sys_observer.emit_region(x, y, image_bytes, ocr_text)
 
-        # Also build immediate chips without waiting for LLM
-        from screen_picker import ScreenPicker as _SP
-        _helper          = _SP.__new__(_SP)
-        content_type     = _helper._detect_content_type(ocr_text)
-        chips            = _helper._build_chips(content_type, ocr_text)
-
-        type_labels = {
-            "word":      "🔤 Word Selected",
-            "sentence":  "📝 Sentence Selected",
-            "paragraph": "📄 Paragraph Selected",
-            "code":      "💻 Code Selected",
-            "error":     "⚠️ Error Detected",
-            "data":      "📊 Data Selected",
-            "visual":    "🖼️ Region Selected",
-        }
-        header       = type_labels.get(content_type, "🎯 Element Selected")
-        clean_text   = " ".join(ocr_text.split())
-        reason       = clean_text[:60] + "..." if len(clean_text) > 60 else clean_text
-        if not reason:
-            reason   = "Visual element selected"
+        # Show immediate "Analyzing..." state
+        clean_text = " ".join(ocr_text.split())
+        display_text = clean_text[:60] + "..." if len(clean_text) > 60 else clean_text
+        if not display_text:
+            display_text = "Analyzing visual element..."
+        else:
+            display_text = f"Analyzing: {display_text}"
 
         payload = {
             "type":           "picked_suggestion",
-            "reason":         f"<b>You’re in:</b> Screen Snipper<br><b>Looks like:</b> {reason}",
-            "reason_long":    f"You just picked a {content_type.replace('_',' ')} to ask about.",
-            "confidence":     0.95,
-            "suggestions":    chips,
-            "screen_context": ocr_text,
+            "reason":         f"<b>You’re in:</b> Screen Snipper<br><b>Looks like:</b> {display_text}",
+            "reason_long":    "Cora is analyzing the selected region to provide specific suggestions.",
+            "confidence":     1.0,
+            "suggestions":    [{"label": "Analyzing...", "hint": "Please wait while Cora thinks..."}],
             "window_title":   self.ctx_manager.get().window_title,
             "app":            self.ctx_manager.get().app,
             "source":         "region",

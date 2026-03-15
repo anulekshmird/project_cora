@@ -73,8 +73,9 @@ class AIEngine(QObject):
             print(f"AIEngine: Rate limited — waiting {wait}s")
             return
 
-        # Enforce minimum interval between calls
-        if (now - self._last_call_time) < self._min_call_interval:
+        # Enforce minimum interval between calls, EXCEPT for user-initiated regions
+        is_user_region = (ctx.source == 'region')
+        if not is_user_region and (now - self._last_call_time) < self._min_call_interval:
             return
 
         with self._lock:
@@ -102,6 +103,36 @@ class AIEngine(QObject):
 
     def _build_suggestion_prompt(self, ctx: Context) -> str:
         content = ctx.best_text()
+        
+        if ctx.source == 'region':
+            return f"""You are CORA, a desktop assistant.
+Identify what is in the selected region and provide specific, helpful suggestions.
+
+SELECTED REGION TEXT:
+{ctx.selected_text}
+
+ACTIVE APP: {ctx.app}
+FILE/PAGE: {ctx.page_title or ctx.file_path}
+
+Task:
+1. Determine exactly what is in the selected region (e.g., a specific code function, a paragraph about a topic, a YouTube comment, etc.).
+2. Return a 'reason' that is specific and grounded (e.g., "Reviewing Python logic in [file]" or "Analyzing article about [topic]").
+3. Return a 'type' like 'code_analysis', 'text_summary', 'video_help', or 'error_fix'.
+4. Return 3 targeted suggestions.
+
+Respond ONLY in this JSON format:
+{{
+  "type": "specific_category",
+  "reason": "Specific summary of what you see",
+  "reason_long": "One detailed sentence explaining why these suggestions help",
+  "confidence": 0.95,
+  "suggestions": [
+    {{"label": "Action", "hint": "Specific detail-oriented instruction"}},
+    {{"label": "Action", "hint": "Specific detail-oriented instruction"}},
+    {{"label": "Action", "hint": "Specific detail-oriented instruction"}}
+  ]
+}}"""
+
         app_hints = {
             'word':    'User is writing a Word document.',
             'editor':  'User is writing code.',
@@ -128,7 +159,7 @@ Do NOT give generic suggestions like "summarize" without context.
 
 Respond ONLY in this exact JSON format, nothing else:
 {{
-  "reason": "You’re in: [App Name] | Looks like: [Natural description of activity]",
+  "reason": "You’re in: [App Name] | Looks like: [Specific title, topic, or content description]",
   "reason_long": "One specific sentence about what would help most for the detected task",
   "confidence": 0.95,
   "suggestions": [
@@ -246,14 +277,21 @@ CRITICAL RULES:
         if not self._client:
             return ""
         try:
+            contents = [prompt]
+            if image:
+                if self._sdk == "new":
+                    contents.append(self._types.Part.from_bytes(data=image, mime_type="image/png"))
+                else:
+                    contents.append({'mime_type': 'image/png', 'data': image})
+
             if self._sdk == "new":
                 response = self._client.models.generate_content(
                     model    = self._model,
-                    contents = [prompt],
+                    contents = contents,
                 )
                 return response.text.strip()
             else:
-                response = self._client.generate_content(prompt)
+                response = self._client.generate_content(contents)
                 return response.text.strip()
         except Exception as e:
             print(f"Gemini call error: {e}")
@@ -274,10 +312,17 @@ CRITICAL RULES:
             last_msg    = messages[-1].get('content', '')
             full_prompt = f"{history_text}User: {last_msg}" if history_text else last_msg
 
+            contents = [full_prompt]
+            if image:
+                if self._sdk == "new":
+                    contents.append(self._types.Part.from_bytes(data=image, mime_type="image/png"))
+                else:
+                    contents.append({'mime_type': 'image/png', 'data': image})
+
             if self._sdk == "new":
                 for chunk in self._client.models.generate_content_stream(
                     model    = self._model,
-                    contents = [full_prompt],
+                    contents = contents,
                     config   = self._types.GenerateContentConfig(
                         max_output_tokens = 4096,
                         temperature       = 0.7,
@@ -313,7 +358,7 @@ CRITICAL RULES:
                     {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
                     {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
                 ]
-                response = self._client.generate_content(full_prompt, stream=True, safety_settings=safety)
+                response = self._client.generate_content(contents, stream=True, safety_settings=safety)
                 for chunk in response:
                     try:
                         if chunk.text:
