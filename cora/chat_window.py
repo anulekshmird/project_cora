@@ -501,6 +501,21 @@ class ChatWindow(QMainWindow):
     def closeEvent(self, event):
         self.closed_signal.emit()
         event.accept()
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._drag_pos = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
+            event.accept()
+
+    def mouseMoveEvent(self, event):
+        if event.buttons() == Qt.MouseButton.LeftButton:
+            if hasattr(self, '_drag_pos') and self._drag_pos:
+                self.move(event.globalPosition().toPoint() - self._drag_pos)
+                event.accept()
+
+    def mouseReleaseEvent(self, event):
+        self._drag_pos = None
+        event.accept()
         
     def init_ui(self):
         central_widget = QWidget()

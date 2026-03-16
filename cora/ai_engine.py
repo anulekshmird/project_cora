@@ -117,55 +117,132 @@ class AIEngine(QObject):
 
         # Anti-Hallucination rules
         strict_rules = """STRICT REALITY RULES:
-1. ONLY suggest based on the ACTUAL visible content provided below.
-2. If the content is sparse, empty, or just a window title, do NOT invent problems or solutions. Simply describe the window or offer general help.
-3. IGNORE all information, topics, or code from previous sessions or windows. This is a FRESH start.
-4. Do NOT hallucinate errors. If you see code, analyze the EXACT code shown. If you see a website, analyze THAT website."""
+1. Suggest based on the ACTUAL visible content provided below. If you don't see classes/functions, DO NOT suggest explaining them.
+2. Be proactive: if the content is light (scant text), use the App/Window Title to offer helpful general actions for that application.
+3. IGNORE all information from previous sessions. This is a FRESH start."""
 
         return f"""You are CORA, a proactive desktop AI assistant.
-Current Activity: {ctx.activity}
-Active App: {ctx.app} | Window: {ctx.window_title}
+
+Context Type: {ctx.activity}
+Active App: {ctx.app}
+File Name / Context Title: {ctx.window_title}
 
 {strict_rules}
 
 {img_instruction}
 
-{source_label}:
+What you see on screen ({source_label}):
 {'='*40}
 {ctx.best_text()[:3000]}
 {'='*40}
 
-TASK: Provide 2-3 SHORT, actionable suggestions (chips) and a 1-sentence reason.
-FORMAT: JSON only.
+Based on this exact content, what may the user need right now?
+Provide EXACTLY 4 SHORT, specific, actionable suggestion chips.
+
+CRITICAL RULE: INTEGRATE ON-SCREEN CONTENT
+At least 2 out of 4 chips MUST incorporate significant keywords or topics found within the PAGE CONTENT (OCR text).
+- GOOD: "Explain [Visible Term]", "Verify [Data Point]".
+- BAD: "Summarize Window", "Analyze Chrome", "Explain Class".
+
+
+EMPTY/LIGHT PAGES:
+If the user is on a "New Tab", "Desktop", "File Explorer", or any empty page, DO NOT try to summarize. Instead:
+- Set reason: "Watching [App Name]" (e.g., "Watching File Explorer").
+- Include a chip: "Need any help?".
+- Offer tips related to that specific app.
+
+SPECIFIC CONTEXT RULES:
+- If CODE is visible: one suggestion MUST be "Check for bugs in [filename or context]". Others must reference specific variables or functions found in the code.
+- If an ERROR is visible: suggest specific debugging or fix actions for that specific error.
+- If WRITING/TEXT is visible: suggest grammar fixes or summarization for the specific topic found on screen.
+- If DATA/TABLES are visible: mention specific columns or headers in the suggestion.
+- ALWAYS mention exact names (functions, variables, topics) found on the screen.
+
+Respond ONLY with a raw JSON block.
+
+STRICT SUGGESTION RULES:
+1. NEVER use generic labels مانند "Help", "Analyze", "Explain", "Insight", or "Next Step" without a specific object from the screen.
+2. Suggestions MUST be directly and obviously derived from the visible screen content.
+3. FORMAT: "[Action] [Actual Word from Screen]" (e.g., "Summarize report.docx", "Explain calculate_sum", "Fix SyntaxError").
+4. At least 2 out of 4 chips MUST follow this format.
+
+JSON FORMAT:
 {{
   "type": "specific_category",
-  "reason": "Brief explanation of WHY these chips were chosen based ONLY on the content above",
-  "reason_long": "One detailed sentence explaining the next step",
+  "reason": "Brief reason based ONLY on content",
+  "reason_long": "One detailed sentence for user info.",
   "confidence": 1.0,
   "suggestions": [
-     {{"label": "Direct Action 1", "hint": "Specific instruction for chat"}},
-     {{"label": "Direct Action 2", "hint": "Specific instruction for chat"}}
+     {{"label": "Specific Action 1", "hint": "Detailed prompt for chat"}},
+     {{"label": "Specific Action 2", "hint": "Detailed prompt for chat"}},
+     {{"label": "Specific Action 3", "hint": "Detailed prompt for chat"}},
+     {{"label": "Specific Action 4", "hint": "Detailed prompt for chat"}}
   ]
-}}"""
+}}
+"""
 
     def _parse_suggestion(self, response: str, ctx: Context) -> dict:
         import json
+        import re
         text = response.strip()
-        if "```json" in text:
-            text = text.split("```json")[1].split("```")[0].strip()
-        elif "```" in text:
-            text = text.split("```")[1].split("```")[0].strip()
+        
+        # Robust JSON extraction: look for the first '{' and last '}'
         try:
-            payload = json.loads(text)
-        except Exception:
+            match = re.search(r'(\{.*\})', text, re.DOTALL)
+            if match:
+                clean_json = match.group(1)
+                payload = json.loads(clean_json)
+            else:
+                # Try raw parsing if no braces found (unlikely but safe)
+                payload = json.loads(text)
+        except Exception as e:
+            print(f"[AI ENGINE] Parse Error: {e}")
+            # Intelligent fallback based on context
+            if ctx.app == 'editor' or ctx.activity == 'coding':
+                 chips = [
+                     {"label": f"Analyze {ctx.window_title[:20]}", "hint": "Analyze the contents of this file."},
+                     {"label": "Check for bugs/issues", "hint": "Scan the visible text/code for potential problems or errors."},
+                     {"label": "Explain content", "hint": "Explain the major elements visible right now."},
+                     {"label": "Need any help?", "hint": "Ask me anything about your current task."}
+                 ]
+            elif ctx.app in ('browser', 'chrome', 'firefox', 'edge'):
+                 chips = [
+                     {"label": f"Summarize {ctx.window_title[:20]}", "hint": "Provide a concise summary of this page."},
+                     {"label": "Extract key points", "hint": "What are the most important takeaways from this page?"},
+                     {"label": "Analyze page topic", "hint": "Perform a detailed analysis of the main subject here."},
+                     {"label": "Find related info", "hint": "What other information relates to what I'm looking at?"}
+                 ]
+            elif ctx.activity == 'writing_document' or ctx.app == 'word':
+                 chips = [
+                     {"label": "Fix grammar & spelling", "hint": "Correct any linguistic errors in the visible text."},
+                     {"label": "Improve document flow", "hint": "Suggest ways to make this text clearer and easier to read."},
+                     {"label": "Summarize section", "hint": "Give me a quick summary of this part of the document."},
+                     {"label": "Continue writing", "hint": "Help me expand on the current visible paragraph."}
+                 ]
+            else:
+                 app_label = ctx.app or "your screen"
+                 chips = [
+                     {"label": "Need any help?", "hint": "I'm watching your screen and ready to assist whenever you need me."},
+                     {"label": f"Analyze {app_label}", "hint": f"Give me a detailed breakdown of what's happening in {app_label}."},
+                     {"label": f"Explore {ctx.window_title[:20]}...", "hint": "Explore the major elements visible right now."},
+                     {"label": "Check for issues", "hint": "Look for grammar, bugs, or logical errors in the current view."}
+                 ]
+            
             payload = {
-                "reason":      ctx.window_title[:50] or "Active screen",
-                "reason_long": "I'm observing your current activity.",
-                "confidence":  0.5,
-                "suggestions": [
-                    {"label": "Ask Anything", "hint": "Ask me about what's on your screen"},
-                ],
+                "reason":      f"Watching {ctx.app or 'your screen'}",
+                "reason_long": f"Cora is observing {ctx.window_title[:40]} and ready to assist.",
+                "confidence":  0.3,
+                "suggestions": chips,
             }
+
+        # Ensure exactly 4 chips
+        payload.setdefault('suggestions', [])
+        while len(payload['suggestions']) < 4 and ctx.source != 'region':
+             payload['suggestions'].append({"label": "More help...", "hint": "Ask Cora for more assistance."})
+        
+        if len(payload['suggestions']) > 4 and ctx.source != 'region':
+             payload['suggestions'] = payload['suggestions'][:4]
+             
         payload['screen_context'] = ctx.best_text()
         payload['window_title']   = ctx.window_title
         payload['app']            = ctx.app
@@ -235,9 +312,9 @@ FORMAT: JSON only.
                 img_directive = "STRICT RULE: Look at the provided IMAGE of this regional selection. The visual details in the screenshot are your primary source of truth."
 
             return f"""You are CORA, a desktop AI assistant. 
-The user has specifically pointed to this content. 
+The user has specifically clicked an action or pointed to this content. 
 {img_directive}
-STRICT RULE: Focus ONLY on the provided snippet/image below. IGNORE all other background information.
+STRICT RULE: Focus ONLY on providing the response for the specified ACTION below using the provided content. 
 
 {source_label}:
 {'='*40}
@@ -246,16 +323,18 @@ STRICT RULE: Focus ONLY on the provided snippet/image below. IGNORE all other ba
 
 ACTIVE APP: {ctx.app} | WINDOW: {ctx.window_title}
 
-USER REQUEST: {user_message}
+ACTION REQUESTED: {user_message}
 
 CRITICAL RULES:
-- Focus EXCLUSIVELY on the content/image provided above. 
-- If the content is specific (like a code snippet), provide a detailed breakdown of THAT snippet.
-- Do NOT talk about the rest of the application or the general window unless it is directly relevant to the snippet.
+- Focus EXCLUSIVELY on answering the action requested.
+- Use the provided context/image to give a precise, technical, or helpful response.
+- If the content is specific (like a code snippet), provide a direct breakdown of THAT snippet.
+- Do NOT talk about the rest of the application or generic context.
 - NEVER use placeholders like "CODE_BLOCK_N". Write out all code inside triple backticks.
 """
 
         return f"""You are CORA, a desktop AI assistant. You have full visibility of the user's screen.
+STRICT RULE: Focus ONLY on providing the response for the specified ACTION below using the provided screen content.
 
 {source_label}:
 {'='*40}
@@ -263,19 +342,16 @@ CRITICAL RULES:
 {'='*40}
 
 APP: {ctx.app} | WINDOW: {ctx.window_title}
-ACTIVITY: {ctx.activity} | NEEDS: {', '.join(ctx.needs)}
+ACTIVITY: {ctx.activity}
 
-USER REQUEST: {user_message}
+ACTION REQUESTED: {user_message}
 
 CRITICAL RULES:
-- The content above IS what the user is looking at. Analyze it deeply in the context of their activity: {ctx.activity}.
+- Focus EXCLUSIVELY on answering the action requested.
+- Use the provided context/image to give a precise, technical, or helpful response.
 - Do NOT just restate the filename or app name.
-- If the user asks for an explanation, explain the ACTUAL LOGIC or MEANING of the content provided.
-- Be extremely specific. Mention variable names, specific sentences, or values found in the content.
-- If asked to fix or rewrite, provide the complete corrected version.
-- NEVER use placeholders like "CODE_BLOCK_N" or "CODE_BLOCK".
-- ALWAYS write out the full code inside the response using triple backticks.
-- Tailor your response to the user's current need: {', '.join(ctx.needs)}."""
+- NEVER use placeholders like "CODE_BLOCK_N". Write out all code inside triple backticks.
+"""
 
     def _build_message_history(self, history: list, prompt: str) -> list:
         messages = []

@@ -114,12 +114,14 @@ class ContextExtractor:
             app, mode = 'word', 'writing'
         elif any(k in tl for k in ['notepad', 'sublime', 'text editor', 'edit']):
              app, mode = 'text_editor', 'coding'
-        elif any(k in tl for k in ['code', 'vscode', 'pycharm', 'intellij', 'studio', '.py', '.js', '.ts', '.html', '.css', '.go', '.rs']):
+        elif any(k in tl for k in ['code', 'vscode', 'pycharm', 'intellij', 'studio', '.py', '.js', '.ts', '.html', '.css', '.go', '.rs', '.txt', '.md', '.json', '.yaml', '.yml', '.requirements']):
             app, mode = 'editor', 'coding'
         elif 'claude' in tl:
             app, mode = 'claude', 'ai'
         elif 'terminal' in tl or 'powershell' in tl or 'cmd.exe' in tl:
             app, mode = 'terminal', 'terminal'
+        elif any(k in tl for k in ['cora suggestion', 'cora ai', 'cora picker']):
+            app, mode = 'idle', 'general'
         elif not title or any(k in tl for k in ['taskbar', 'system tray', 'desktop', 'program manager']):
             app, mode = 'idle', 'general'
         else:
@@ -137,7 +139,7 @@ class ContextExtractor:
             # More robust regex: look for words with extensions. 
             # Avoid picking up full sentences by limiting length and character set.
             # Example: main.py, setup.py, document.docx, README.md, script.js
-            match = re.search(r'([a-zA-Z0-9_\-]+\.[a-zA-Z0-9]{1,5})\b', title)
+            match = re.search(r'([a-zA-Z0-9_\-\.\+]+\.[a-zA-Z0-9]{1,10})', title)
             if match:
                 file_path = match.group(1)
                 page_title = file_path
@@ -227,8 +229,18 @@ class ContextExtractor:
                     window_title=title, 
                     mode_primary=mode
                 )[:3000]
+                
+                # Store image bytes for Gemini
+                import io
+                img_byte_arr = io.BytesIO()
+                img.save(img_byte_arr, format='PNG')
+                image_bytes = img_byte_arr.getvalue()
+                
             except Exception as e:
                 print(f"OCR error in extractor: {e}")
+                image_bytes = None
+        else:
+            image_bytes = None
 
         # Activity and needs inference
         page_title = title.split(' - ')[0] if ' - ' in title else title
@@ -251,6 +263,7 @@ class ContextExtractor:
             needs        = needs,
             url          = enrich['url'],
             file_path    = enrich['file_path'],
+            image        = image_bytes,
             source       = 'window',
             timestamp    = data.get('timestamp', time.time()),
         )
@@ -272,9 +285,9 @@ class ContextExtractor:
             return "watching_video"
         if "github" in text or "github" in title:
             return "browsing_repo"
-        if any(k in text for k in ["error", "traceback", "exception", "failed", "syntaxerror"]):
+        if any(k in text for k in ["traceback (most recent call last):", "syntaxerror:", "runtimeerror:", "attributeerror:"]):
             return "debugging_error"
-        if app == "editor" or any(k in title for k in [".py", ".js", ".ts", "code", "editor", "pycharm"]):
+        if app == "editor" or any(k in title for k in [".py", ".js", ".ts", ".html", ".css", ".txt", ".md", ".json", "code", "editor", "pycharm"]):
             return "coding"
         if any(k in text for k in ["what is", "overview", "learn", "how to"]):
             return "reading_article"
@@ -284,6 +297,10 @@ class ContextExtractor:
             return "writing_document"
         if ".pdf" in title:
             return "reading_pdf"
+        
+        # Fallback to more descriptive "exploring" if we have some text
+        if len(text.strip()) > 50:
+            return "exploring_content"
 
         return "general_browsing"
 

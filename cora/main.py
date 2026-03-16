@@ -141,12 +141,13 @@ class CoraApp(QObject):
 
         # Layer 3 → Layer 5 (Reactive UI)
         self.ctx_manager.context_updated.connect(self._on_context_updated)
+        self.ctx_manager.context_updated.connect(lambda ctx: self.bubble.set_context_status(ctx))
 
         # UI actions → pipeline
         self.bubble.dismissed.connect(self._on_dismissed)
         self.bubble.ask_cora_clicked.connect(self._on_chip_clicked)
         self.bubble.pick_requested.connect(self.start_pick_to_ask)
-        self.bubble.refresh_requested.connect(self.handle_manual_refresh)
+        # self.bubble.refresh_requested.connect(self.handle_manual_refresh)
 
         # Chat window → AI engine
         self.chat_win.send_message_signal.connect(self._on_chat_message_sent)
@@ -329,6 +330,7 @@ class CoraApp(QObject):
             skip = [
                 'cora picker', 'snipping tool', 'task switching',
                 'task manager', 'new notification', 'system tray',
+                'cora suggestion', 'cora ai',
             ]
             if any(k in tl for k in skip):
                 return
@@ -420,10 +422,11 @@ class CoraApp(QObject):
                     doing = "Browsing web content"
                 else:
                     doing = f"Reading: {clean_page}"
-        elif any(k in tl for k in ['code', 'vscode', 'pycharm', '.py', '.js', '.ts', '.html', '.css']):
+        elif any(k in tl for k in ['code', 'vscode', 'pycharm', '.py', '.js', '.ts', '.html', '.css', '.txt', '.md', '.json', '.yaml', '.yml', '.rs', '.go', '.cpp', '.h', '.requirements']):
             app_name = "VS Code" if ("code" in tl or "vscode" in tl) else "Code Editor"
-            match = re.search(r'([a-zA-Z0-9_\-]+\.[a-z]{1,4})', title)
-            fname = match.group(1) if match else "source file"
+            # Smarter regex to find filename with extension
+            match = re.search(r'([a-zA-Z0-9_\-\.\+]+\.[a-zA-Z0-9]{1,10})', title)
+            fname = match.group(1) if match else "document"
             doing = f"Editing {fname}"
         elif '.pdf' in tl:
             app_name = "PDF Reader"
@@ -480,6 +483,8 @@ class CoraApp(QObject):
             'task manager', 
             'new notification',
             'system tray overflow',
+            'cora suggestion',
+            'cora ai',
         ]
         if any(k in win_lower for k in skip):
             print(f"[OBSERVE] Skipping: {current_window[:40]}")

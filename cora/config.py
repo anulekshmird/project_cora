@@ -37,19 +37,29 @@ WHAT TO DESCRIBE:
 
 OUTPUT FORMAT (JSON ONLY — no prose, no markdown wrapper):
 {
-  "reason": "Specific content description ≤12 words",
-  "reason_long": "1-2 sentence detail about what user is doing",
+  "reason": "Watching [App name] - [Specific Topic] ≤12 words",
+  "reason_long": "1-2 sentence detail about what user is doing in [App Name]",
   "confidence": 0.0-1.0,
   "suggestions": [
-    { "label": "Action label", "hint": "Specific helpful action" }
+    { "label": "Specific Action 1", "hint": "Grounded instruction with topic name" },
+    { "label": "Specific Action 2", "hint": "Grounded instruction with topic name" },
+    { "label": "Specific Action 3", "hint": "Grounded instruction with topic name" },
+    { "label": "Specific Action 4", "hint": "Grounded instruction with topic name" }
   ]
 }
 
 CONFIDENCE GUIDE:
-- 0.8+: Clear content visible, high-value suggestion
-- 0.5-0.8: Partial content, reasonable suggestion
-- < 0.35: Skip — not enough context
+- 0.8+: Clear focus, high-value content-integrated suggestion
+- 0.5-0.8: Mixed content, reasonable suggestion
+- < 0.35: Light context (New Tab, Desktop, empty apps) — use "Need any help?"
 - 0.0: Static screen, nothing actionable
+
+CORE RULES:
+1. SIGNIFICANT KEYWORDS: Extract nouns, headings, or bold text from the PAGE CONTENT (OCR).
+   - DO NOT use the app name or window title as a keyword.
+2. APP AWARENESS: Always include the App Name in "reason" (e.g. "Watching File Explorer").
+3. NO GENERIC CHIPS: Unless confidence is < 0.35, every chip must use a keyword from the content.
+4. "NEED ANY HELP?": Add this chip for light contexts like "New Tab" or "Desktop".
 """
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -81,9 +91,10 @@ OUTPUT FORMAT (JSON ONLY):
   "confidence": 0.0-1.0,
   "type": "writing_suggestion",
   "suggestions": [
-    { "label": "Fix Grammar", "hint": "Correct grammatical issues in visible text" },
-    { "label": "Improve Clarity", "hint": "Rewrite unclear sentences" },
-    { "label": "Summarize Section", "hint": "Summarize visible paragraph" }
+    { "label": "Fix Grammar in [topic]", "hint": "Correct grammatical issues in the visible text about [topic]" },
+    { "label": "Improve [section] Clarity", "hint": "Rewrite unclear sentences in the [section] area" },
+    { "label": "Summarize [Topic]", "hint": "Summarize the visible paragraph about [Topic]" },
+    { "label": "Continue [Topic]", "hint": "Help me expand on the current visible section about [Topic]" }
   ]
 }
 
@@ -116,8 +127,10 @@ OUTPUT FORMAT (JSON ONLY):
   "confidence": 0.0-1.0,
   "type": "reading_suggestion",
   "suggestions": [
-    { "label": "Summarize Page", "hint": "Get a brief summary of visible text" },
-    { "label": "Key Points", "hint": "Extract key takeaways from visible content" }
+    { "label": "Summarize [Topic]", "hint": "Get a brief summary of the visible text about [Topic]" },
+    { "label": "Key Points of [Topic]", "hint": "Extract key takeaways from visible content about [Topic]" },
+    { "label": "Explain [Term]", "hint": "Detailed explanation of a visible technical term" },
+    { "label": "Analyze [Section]", "hint": "Deep dive into the specific visible section" }
   ]
 }
 
@@ -150,8 +163,8 @@ OUTPUT FORMAT (JSON ONLY):
   "confidence": 0.0-1.0,
   "type": "writing_suggestion",
   "suggestions": [
-    { "label": "Fix Grammar", "hint": "Correct the detected grammar issue" },
-    { "label": "Improve Clarity", "hint": "Rewrite the unclear sentence" }
+    { "label": "Action: [Content Keyword]", "hint": "Address the specific detected issue" },
+    { "label": "Improve [Content Keyword]", "hint": "Rewrite the section containing this word" }
   ]
 }
 

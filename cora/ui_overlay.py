@@ -9,6 +9,10 @@ from PyQt6.QtWidgets import (
     QLineEdit
 )
 
+# ── Global configuration ───────────────────────────────────────────────────
+
+# Labels (moved inside ProactiveBubble for scope reliability)
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Prompt builders
@@ -136,7 +140,31 @@ class ProactiveBubble(QWidget):
         self.is_expanded           = False
         self.is_read_more_expanded = False
         self.orb_state             = self.STATE_IDLE
-        self._pending_data         = None  # queued suggestion during fade-out
+        self._pending_data         = None
+        self.user_bubble_pos       = None # To store dragged position
+
+        # Labels for UI display
+        self.APP_LABELS = {
+            "editor":  "VS Code",
+            "browser": "Web Browser",
+            "youtube": "YouTube",
+            "word":    "Microsoft Word",
+            "claude":  "Claude AI",
+            "idle":    "Desktop",
+        }
+        self.LABELS = {
+            "coding":           "Coding",
+            "debugging_error":  "Debugging Error",
+            "watching_video":   "Watching Video",
+            "reading_article":  "Reading Article",
+            "reading_pdf":      "Reading PDF",
+            "writing_document": "Writing",
+            "chatting":         "Chatting",
+            "browsing_repo":    "Browsing Repo",
+            "searching_topic":  "Searching",
+            "general_browsing": "Browsing",
+            "idle":             "Need any help?",
+        }
 
         # No auto-dismiss — bubble stays until user clicks Dismiss or context changes
         self._dismiss_timer = QTimer(self)
@@ -177,6 +205,20 @@ class ProactiveBubble(QWidget):
         self.panel_layout = QVBoxLayout(self.panel)
         self.panel_layout.setContentsMargins(20, 15, 20, 15)
         self.panel_layout.setSpacing(8)
+
+        self.status_label = QLabel("")
+        self.status_label.setObjectName("status")
+        self.status_label.setStyleSheet("""
+            QLabel#status {
+                font-size: 11px;
+                color: #60a5fa;
+                font-weight: bold;
+                border-bottom: 1px solid #1e293b;
+                padding-bottom: 4px;
+                margin-bottom: 4px;
+            }
+        """)
+        self.status_label.setWordWrap(True)
 
         self.header_label = QLabel("Suggestion")
         self.header_label.setObjectName("header")
@@ -220,6 +262,7 @@ class ProactiveBubble(QWidget):
         """)
         self.ask_input.returnPressed.connect(self.on_ask_input_submit)
 
+        self.panel_layout.addWidget(self.status_label)
         self.panel_layout.addWidget(self.header_label)
         self.panel_layout.addWidget(self.content_label)
         self.panel_layout.addWidget(self.read_more_btn)
@@ -235,6 +278,10 @@ class ProactiveBubble(QWidget):
         self.main_layout.addWidget(self.bubble_btn)
         self.panel.hide()
 
+        # Drag support
+        self.bubble_btn.installEventFilter(self)
+        self.panel.installEventFilter(self)
+
         self.opacity_effect = QGraphicsOpacityEffect(self)
         self.setGraphicsEffect(self.opacity_effect)
         self.opacity_effect.setOpacity(1.0) # Always visible by default
@@ -248,6 +295,27 @@ class ProactiveBubble(QWidget):
 
     # ── Drag ─────────────────────────────────────────────────────────
 
+    def eventFilter(self, obj, event):
+        if event.type() == event.Type.MouseButtonPress:
+            if event.button() == Qt.MouseButton.LeftButton:
+                self._drag_pos = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
+                # Don't return True here so buttons still get press
+        elif event.type() == event.Type.MouseMove:
+            if event.buttons() == Qt.MouseButton.LeftButton:
+                if hasattr(self, '_drag_pos') and self._drag_pos:
+                    # Check distance to avoid accidental drag on click
+                    delta = event.globalPosition().toPoint() - (self.pos() + self._drag_pos)
+                    if delta.manhattanLength() > 5:
+                        new_pos = event.globalPosition().toPoint() - self._drag_pos
+                        self.move(new_pos)
+                        # Store where the BUBBLE button is in global space
+                        # In the QHBoxLayout (AlignRight), the bubble is at the right edge
+                        self.user_bubble_pos = new_pos + QPoint(self.width() - self.bubble_size, self.height() - self.bubble_size)
+                        return True
+        elif event.type() == event.Type.MouseButtonRelease:
+            self._drag_pos = None
+        return super().eventFilter(obj, event)
+
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
             self._drag_pos = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
@@ -256,11 +324,14 @@ class ProactiveBubble(QWidget):
     def mouseMoveEvent(self, event):
         if event.buttons() == Qt.MouseButton.LeftButton:
             if hasattr(self, '_drag_pos') and self._drag_pos:
-                self.move(event.globalPosition().toPoint() - self._drag_pos)
+                new_pos = event.globalPosition().toPoint() - self._drag_pos
+                self.move(new_pos)
+                self.user_bubble_pos = new_pos + QPoint(self.width() - self.bubble_size, self.height() - self.bubble_size)
                 event.accept()
 
     def mouseReleaseEvent(self, event):
         self._drag_pos = None
+        event.accept()
 
     def enterEvent(self, event):
         self.is_hovered = True
@@ -391,45 +462,38 @@ class ProactiveBubble(QWidget):
             total_w += self.panel_width + 15
             self.panel.setFixedSize(self.panel_width, current_panel_h)
         total_h = max(self.bubble_size, current_panel_h) + self.margin
-        x = self.screen_geo.x() + self.screen_geo.width()  - total_w
-        y = self.screen_geo.y() + self.screen_geo.height() - total_h
+        
+        if self.user_bubble_pos:
+            # Respect user's dragged position for the ORB
+            x = self.user_bubble_pos.x() - (total_w - self.bubble_size)
+            y = self.user_bubble_pos.y() - (total_h - self.bubble_size)
+        else:
+            # Default to bottom-right corner
+            x = self.screen_geo.x() + self.screen_geo.width()  - total_w
+            y = self.screen_geo.y() + self.screen_geo.height() - total_h
+            
         self.setGeometry(x, y, total_w, total_h)
+        self.show() # Ensure always visible
+        self.raise_()
 
     def set_context_status(self, ctx_data: object):
         """Update the bubble's description while idle or if panel is visible."""
         # ctx_data is a Context object from context_extractor
-        activity = getattr(ctx_data, 'activity', 'general_browsing')
-        app      = getattr(ctx_data, 'app', 'general')
-        file_path = getattr(ctx_data, 'file_path', None)
+    def _get_activity_label(self, ctx_data):
+        # Build "Doing" part using context object or dict
+        if isinstance(ctx_data, dict):
+             activity   = ctx_data.get('activity', 'general_browsing')
+             app        = ctx_data.get('app', 'general')
+             file_path  = ctx_data.get('file_path')
+             page_title = ctx_data.get('page_title')
+        else:
+             activity   = getattr(ctx_data, 'activity', 'general_browsing')
+             app        = getattr(ctx_data, 'app', 'general')
+             file_path  = getattr(ctx_data, 'file_path', None)
+             page_title = getattr(ctx_data, 'page_title', None)
+
+        app_name = self.APP_LABELS.get(app, app.capitalize())
         
-        # Human friendly labels
-        APP_LABELS = {
-            "editor":  "VS Code",
-            "browser": "Web Browser",
-            "youtube": "YouTube",
-            "word":    "Microsoft Word",
-            "claude":  "Claude AI",
-            "idle":    "Desktop",
-        }
-        
-        LABELS = {
-            "coding":           "Coding",
-            "debugging_error":  "Debugging Error",
-            "watching_video":   "Watching Video",
-            "reading_article":  "Reading Article",
-            "reading_pdf":      "Reading PDF",
-            "writing_document": "Writing",
-            "chatting":         "Chatting",
-            "browsing_repo":    "Browsing Repo",
-            "searching_topic":  "Searching",
-            "general_browsing": "Browsing",
-            "idle":             "Need any help?",
-        }
-        
-        app_name = APP_LABELS.get(app, app.capitalize())
-        
-        # Build "Doing" part
-        page_title = getattr(ctx_data, 'page_title', None)
         if activity == "coding" and file_path:
             doing = f"Editing {file_path}"
         elif activity == "writing_document" and file_path:
@@ -440,12 +504,44 @@ class ProactiveBubble(QWidget):
             doing = f"Reading: {page_title}"
         elif activity == "watching_video" and page_title:
             doing = f"Watching: {page_title}"
+        elif activity == "searching_topic" and page_title:
+            doing = f"Searching: {page_title}"
+        elif activity == "browsing_repo" and page_title:
+            doing = f"Browsing: {page_title}"
+        elif activity == "debugging_error":
+            doing = f"Debugging Error{' in ' + file_path if file_path else ''}"
+        elif activity == "chatting" and app_name:
+            doing = f"Chatting on {app_name}"
         else:
-            doing = LABELS.get(activity, activity.replace('_', ' ').capitalize())
+            doing = activity.replace("_", " ").capitalize()
+            
+        return app_name, doing
+
+    def set_context_status(self, ctx_data: object):
+        page_title = getattr(ctx_data, 'page_title', None)
+        app_name, doing = self._get_activity_label(ctx_data)
+        
+        # Update the top header label immediately
+        full_status = f"<b>{app_name}</b> | {doing}"
+        if hasattr(self, 'status_label') and self.status_label.text() != full_status:
+            self.status_label.setText(full_status)
+            self.status_label.show()
+        
+        # Update the panel content if IDLE
+        if self.orb_state == self.STATE_IDLE:
+             self.content_label.setText(f"Cora is observing {doing.lower()} and ready to assist.")
         
         # Format as HTML for premium look
         status_html = f"<b>You’re in:</b> {app_name}<br><b>Looks like:</b> {doing}"
         
+        # Update the persistent status label
+        if hasattr(self, 'status_label'):
+            # Use small bold tags for the persistent status
+            persistent_html = f"<b>{app_name}</b> | {doing}"
+            if self.status_label.text() != persistent_html:
+                self.status_label.setText(persistent_html)
+                self.status_label.show()
+
         # If we are in IDLE state or only basic suggestion, update content_label as a status indicator
         if self.orb_state == self.STATE_IDLE or (self.current_data and self.current_data.get('type') == 'general'):
              self.content_label.setText(status_html)
@@ -461,7 +557,8 @@ class ProactiveBubble(QWidget):
     def show_suggestion(self, data: dict):
         try:
             self.current_data = data
-            self.show()  # always show
+            if not self.isVisible():
+                self.show()
             # Stop any running animation immediately
             self.anim.stop()
             try:
@@ -500,6 +597,14 @@ class ProactiveBubble(QWidget):
         suggestion_type     = data.get('type', 'general')
         reason              = data.get('reason', 'No details')
         reason_long         = data.get('reason_long', '')
+
+        # Update status label from payload to ensure consistency
+        app_name, doing = self._get_activity_label(data)
+        
+        full_status = f"<b>{app_name}</b> | {doing}"
+        if hasattr(self, 'status_label'):
+            self.status_label.setText(full_status)
+            self.status_label.show()
 
         # Always reset state for new suggestion
         self.anim.stop()
@@ -587,50 +692,65 @@ class ProactiveBubble(QWidget):
             if not suggestions:
                 FALLBACKS = {
                     'writing_suggestion':      [
-                        {"label": "Summarize",       "hint": "Summarize this content"},
-                        {"label": "Fix Grammar",     "hint": "Fix grammar issues"},
-                        {"label": "Improve Clarity", "hint": "Improve text clarity"},
+                        {"label": "Summarize text",   "hint": "Summarize the visible document text"},
+                        {"label": "Fix grammar",     "hint": "Correct grammar and spelling in this text"},
+                        {"label": "Improve clarity", "hint": "Make this text clearer and easier to read"},
+                        {"label": "Continue flow",   "hint": "Help me continue writing this section"},
                     ],
                     'reading_suggestion':      [
-                        {"label": "Summarize Page",   "hint": "Summarize the visible page"},
-                        {"label": "Explain Concepts", "hint": "Explain key concepts on this page"},
-                        {"label": "Key Points",       "hint": "Extract key points as bullets"},
+                        {"label": "Summarize page",   "hint": "Summarize the visible page content"},
+                        {"label": "Explain topics",  "hint": "Explain the key topics on this page"},
+                        {"label": "Extract points",  "hint": "List the most important takeaways"},
+                        {"label": "Find insights",   "hint": "Provide interesting insights from this text"},
                     ],
                     'pdf_suggestion':          [
-                        {"label": "Summarize Page", "hint": "Summarize the visible PDF page"},
-                        {"label": "Key Points",     "hint": "Extract key points"},
-                        {"label": "Explain Terms",  "hint": "Explain technical terms"},
+                        {"label": "Summarize PDF",  "hint": "Summarize this PDF page"},
+                        {"label": "Extract facts",  "hint": "List the core facts from this document"},
+                        {"label": "Explain terms",  "hint": "Define any technical terms shown here"},
+                        {"label": "Analyze chart",  "hint": "Explain any visible data or charts"},
                     ],
                     'spreadsheet_suggestion':  [
-                        {"label": "Explain Formula", "hint": "Explain visible formulas"},
-                        {"label": "Analyze Data",    "hint": "Find patterns in visible data"},
+                        {"label": "Explain formula", "hint": "Explain the visible spreadsheet formulas"},
+                        {"label": "Analyze data",    "hint": "Identify patterns in this data"},
+                        {"label": "Summarize sheet", "hint": "Give me a high-level summary of this sheet"},
+                        {"label": "Suggest calc",    "hint": "What calculation should I perform next?"},
                     ],
                     'youtube_suggestion':      [
-                        {"label": "Explain Topic", "hint": "Explain the video topic from title"},
-                        {"label": "Key Points",    "hint": "Extract visible subtitle points"},
+                        {"label": "Summarize video", "hint": "Summarize the video topic/content"},
+                        {"label": "Extract points",  "hint": "List the main points discussed"},
+                        {"label": "Explain context", "hint": "Explain the context of this video"},
+                        {"label": "Suggest similar", "hint": "What else should I watch regarding this?"},
                     ],
                     'browser_suggestion':      [
-                        {"label": "Summarize",  "hint": "Summarize this page"},
-                        {"label": "Key Ideas",  "hint": "Extract key ideas from this page"},
+                        {"label": "Summarize page", "hint": "Provide a summary of this web page"},
+                        {"label": "Key takeaways",  "hint": "What are the most important ideas here?"},
+                        {"label": "Search topic",   "hint": "Help me find more about this topic"},
+                        {"label": "Analyze site",   "hint": "Tell me about this website and its content"},
                     ],
                     'developer_suggestion':    [
-                        {"label": "Explain Code", "hint": "Explain the visible code"},
-                        {"label": "Find Issues",  "hint": "Identify potential issues in the code"},
+                        {"label": "Check for bugs", "hint": "Scan the code for potential issues"},
+                        {"label": "Explain logic",  "hint": "Explain how this code works"},
+                        {"label": "Optimize code",  "hint": "Suggest ways to make this code better"},
+                        {"label": "Find patterns",  "hint": "Identify architectural patterns here"},
                     ],
                     'presentation_suggestion': [
-                        {"label": "Improve Slide",  "hint": "Improve the current slide content"},
-                        {"label": "Speaker Notes",  "hint": "Write speaker notes for this slide"},
-                        {"label": "Summarize Deck", "hint": "Summarize the presentation so far"},
+                        {"label": "Improve slide",  "hint": "Refine the content on this slide"},
+                        {"label": "Speaker notes",  "hint": "Write notes for this slide"},
+                        {"label": "Summarize deck", "hint": "Summarize the entire presentation"},
+                        {"label": "Fix layout",     "hint": "Suggest better layout for this slide"},
                     ],
                     'ai_suggestion': [
-                        {"label": "Improve Prompt",  "hint": "Help me write a better prompt"},
-                        {"label": "Follow-up Ideas", "hint": "Suggest follow-up questions"},
-                        {"label": "Summarize Chat",  "hint": "Summarize the current conversation"},
+                        {"label": "Improve prompt",  "hint": "Make my last prompt better"},
+                        {"label": "Next ideas",      "hint": "Give me follow-up questions"},
+                        {"label": "Summarize chat",  "hint": "Summarize our conversation so far"},
+                        {"label": "Explain AI",      "hint": "Explain the AI reasoning here"},
                     ],
                 }
                 suggestions = FALLBACKS.get(suggestion_type, [
-                    {"label": "Explain",   "hint": "Explain the visible content"},
-                    {"label": "Summarize", "hint": "Summarize what is on screen"},
+                    {"label": "Summarize page",   "hint": "Summarize the visible text or document"},
+                    {"label": "Key takeaways",   "hint": "Extract the specific main points from this"},
+                    {"label": "Deep analysis",   "hint": "Apply deep analysis to the visible elements"},
+                    {"label": "Check for issues", "hint": "Look for grammar, bugs, or logical errors"},
                 ])
             self._add_suggestion_chips(suggestions)
 
@@ -751,11 +871,8 @@ class ProactiveBubble(QWidget):
             self.dynamic_btns_layout.addWidget(btn)
 
     def _on_dismiss_clicked(self):
-        self.current_data = None
-        self.is_expanded   = False
-        self.panel.hide()
+        self.enter_idle_mode()
         self.dismissed.emit()
-        self.update_layout_pos()
 
     def _add_suggestion_chips(self, suggestions):
         # Clear existing chips
@@ -844,6 +961,7 @@ class ProactiveBubble(QWidget):
     def enter_idle_mode(self):
         self.anim.stop()
         self.opacity_effect.setOpacity(1.0)
+        self.current_data = None
         self.is_expanded = False
         self.panel.hide()
         self._set_orb_state(self.STATE_IDLE)
