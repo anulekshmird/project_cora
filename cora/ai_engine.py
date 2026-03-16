@@ -117,54 +117,40 @@ class AIEngine(QObject):
 
         # Anti-Hallucination rules
         strict_rules = """STRICT REALITY RULES:
-1. Suggest based on the ACTUAL visible content provided below. If you don't see classes/functions, DO NOT suggest explaining them.
+1. Suggest based on the ACTUAL visible content provided below.
 2. Be proactive: if the content is light (scant text), use the App/Window Title to offer helpful general actions for that application.
-3. IGNORE all information from previous sessions. This is a FRESH start."""
+3. IGNORE all information from previous sessions. This is a FRESH start.
+4. If you see code, analyze the code shown. If you see a website, analyze that website."""
 
         return f"""You are CORA, a proactive desktop AI assistant.
-
-Context Type: {ctx.activity}
-Active App: {ctx.app}
-File Name / Context Title: {ctx.window_title}
+Current Activity: {ctx.activity}
+Active App: {ctx.app} | Window: {ctx.window_title}
 
 {strict_rules}
 
 {img_instruction}
 
-What you see on screen ({source_label}):
+{source_label}:
 {'='*40}
 {ctx.best_text()[:3000]}
 {'='*40}
 
-Based on this exact content, what may the user need right now?
-Provide EXACTLY 4 SHORT, specific, actionable suggestion chips.
-
-CRITICAL RULE: INTEGRATE ON-SCREEN CONTENT
-At least 2 out of 4 chips MUST incorporate significant keywords or topics found within the PAGE CONTENT (OCR text).
-- GOOD: "Explain [Visible Term]", "Verify [Data Point]".
-- BAD: "Summarize Window", "Analyze Chrome", "Explain Class".
-
-
-EMPTY/LIGHT PAGES:
-If the user is on a "New Tab", "Desktop", "File Explorer", or any empty page, DO NOT try to summarize. Instead:
-- Set reason: "Watching [App Name]" (e.g., "Watching File Explorer").
-- Include a chip: "Need any help?".
-- Offer tips related to that specific app.
+TASK: "What are the most useful actions for the user right now?"
+Provide EXACTLY 4 SHORT, specific, actionable suggestion chips that are OBVIOUSLY derived from the visible content.
 
 SPECIFIC CONTEXT RULES:
-- If CODE is visible: one suggestion MUST be "Check for bugs in [filename or context]". Others must reference specific variables or functions found in the code.
-- If an ERROR is visible: suggest specific debugging or fix actions for that specific error.
-- If WRITING/TEXT is visible: suggest grammar fixes or summarization for the specific topic found on screen.
-- If DATA/TABLES are visible: mention specific columns or headers in the suggestion.
-- ALWAYS mention exact names (functions, variables, topics) found on the screen.
+- If CODE is visible: suggest specific optimizations, explanations, or implementation steps (e.g. "Optimize loop in main.py").
+- MANDATORY CODE RULE: If you see code, one suggestion MUST have the label "Check for bugs" and a hint to check for common errors.
+- If an ERROR is visible: suggest specific debugging or fix actions (e.g. "Fix SyntaxError in line 42").
+- If WRITING/TEXT is visible: suggest grammar fixes, rewriting, or summarization (e.g. "Fix spelling in intro paragraph").
+- If DATA/TABLES are visible: suggest analysis or data extraction (e.g. "Calculate total from column B").
+- ALWAYS mention exact names (functions, variables, files, titles) found on the screen in the labels.
 
 Respond ONLY with a raw JSON block.
 
 STRICT SUGGESTION RULES:
-1. NEVER use generic labels مانند "Help", "Analyze", "Explain", "Insight", or "Next Step" without a specific object from the screen.
-2. Suggestions MUST be directly and obviously derived from the visible screen content.
-3. FORMAT: "[Action] [Actual Word from Screen]" (e.g., "Summarize report.docx", "Explain calculate_sum", "Fix SyntaxError").
-4. At least 2 out of 4 chips MUST follow this format.
+1. NEVER use generic labels like "Help", "Analyze", "Explain", "Insight", or "Next Step" without a specific object.
+2. Suggestions MUST be directly and obviously derived from the visible content.
 
 JSON FORMAT:
 {{
@@ -174,9 +160,7 @@ JSON FORMAT:
   "confidence": 1.0,
   "suggestions": [
      {{"label": "Specific Action 1", "hint": "Detailed prompt for chat"}},
-     {{"label": "Specific Action 2", "hint": "Detailed prompt for chat"}},
-     {{"label": "Specific Action 3", "hint": "Detailed prompt for chat"}},
-     {{"label": "Specific Action 4", "hint": "Detailed prompt for chat"}}
+     ... (exactly 4 items)
   ]
 }}
 """
@@ -198,34 +182,35 @@ JSON FORMAT:
         except Exception as e:
             print(f"[AI ENGINE] Parse Error: {e}")
             # Intelligent fallback based on context
-            if ctx.app == 'editor' or ctx.activity == 'coding':
+            if ctx.app == 'editor' or ctx.activity == 'coding' or ctx.file_path:
+                 name = os.path.basename(ctx.file_path) if ctx.file_path else "code"
                  chips = [
-                     {"label": f"Analyze {ctx.window_title[:20]}", "hint": "Analyze the contents of this file."},
-                     {"label": "Check for bugs/issues", "hint": "Scan the visible text/code for potential problems or errors."},
-                     {"label": "Explain content", "hint": "Explain the major elements visible right now."},
-                     {"label": "Need any help?", "hint": "Ask me anything about your current task."}
+                     {"label": f"Optimize {name}", "hint": f"How can I optimize the code visible in {name}?"},
+                     {"label": "Check for bugs", "hint": "Check the visible code for potential issues or bugs."},
+                     {"label": "Explain Logic", "hint": "Explain what this part of the code does."},
+                     {"label": "Refactor Code", "hint": "Suggest ways to refactor this code for better readability."}
                  ]
             elif ctx.app in ('browser', 'chrome', 'firefox', 'edge'):
+                 target = ctx.page_title or "this page"
                  chips = [
-                     {"label": f"Summarize {ctx.window_title[:20]}", "hint": "Provide a concise summary of this page."},
-                     {"label": "Extract key points", "hint": "What are the most important takeaways from this page?"},
-                     {"label": "Analyze page topic", "hint": "Perform a detailed analysis of the main subject here."},
-                     {"label": "Find related info", "hint": "What other information relates to what I'm looking at?"}
+                     {"label": f"Summarize {target}", "hint": f"Give me a summary of {target}."},
+                     {"label": "Key Takeaways", "hint": "What are the most important points here?"},
+                     {"label": "Research Topic", "hint": "Find more information related to what's on screen."},
+                     {"label": "Analyze Page", "hint": "Provide a detailed analysis of this page."}
                  ]
             elif ctx.activity == 'writing_document' or ctx.app == 'word':
                  chips = [
-                     {"label": "Fix grammar & spelling", "hint": "Correct any linguistic errors in the visible text."},
-                     {"label": "Improve document flow", "hint": "Suggest ways to make this text clearer and easier to read."},
-                     {"label": "Summarize section", "hint": "Give me a quick summary of this part of the document."},
-                     {"label": "Continue writing", "hint": "Help me expand on the current visible paragraph."}
+                     {"label": "Fix Grammar", "hint": "Correct any grammatical errors in the visible text."},
+                     {"label": "Improve Wording", "hint": "Suggest ways to improve the clarity and flow."},
+                     {"label": "Continue Writing", "hint": "Help me continue writing this section."},
+                     {"label": "Check Structure", "hint": "Analyze the structure of this document."}
                  ]
             else:
-                 app_label = ctx.app or "your screen"
                  chips = [
-                     {"label": "Need any help?", "hint": "I'm watching your screen and ready to assist whenever you need me."},
-                     {"label": f"Analyze {app_label}", "hint": f"Give me a detailed breakdown of what's happening in {app_label}."},
-                     {"label": f"Explore {ctx.window_title[:20]}...", "hint": "Explore the major elements visible right now."},
-                     {"label": "Check for issues", "hint": "Look for grammar, bugs, or logical errors in the current view."}
+                     {"label": "How can I help?", "hint": "Suggest some things you can do for me here."},
+                     {"label": "Analyze Screen", "hint": "Explain what I'm looking at right now."},
+                     {"label": "Summarize Text", "hint": "Summarize the text currently on screen."},
+                     {"label": "Next Steps", "hint": "What should I do next based on this screen?"}
                  ]
             
             payload = {
@@ -235,13 +220,32 @@ JSON FORMAT:
                 "suggestions": chips,
             }
 
-        # Ensure exactly 4 chips
+        # Ensure essential fields exist
         payload.setdefault('suggestions', [])
-        while len(payload['suggestions']) < 4 and ctx.source != 'region':
-             payload['suggestions'].append({"label": "More help...", "hint": "Ask Cora for more assistance."})
-        
-        if len(payload['suggestions']) > 4 and ctx.source != 'region':
-             payload['suggestions'] = payload['suggestions'][:4]
+        payload.setdefault('type', 'general')
+
+        # Enforce "Check for bugs" for coding context
+        is_coding = (ctx.app == 'editor' or ctx.activity == 'coding' or ctx.file_path)
+        if is_coding:
+             if payload['type'] == 'general':
+                 payload['type'] = 'developer_suggestion'
+             
+             # Check if "Check for bugs" is already there (case-insensitive)
+             has_bug_check = any("check for bugs" in s.get('label', '').lower() for s in payload['suggestions'])
+             if not has_bug_check:
+                 bug_chip = {"label": "Check for bugs", "hint": "Check the visible code for potential issues or bugs."}
+                 if len(payload['suggestions']) < 4:
+                     payload['suggestions'].append(bug_chip)
+                 else:
+                     # Replace the last one if already at 4
+                     payload['suggestions'][3] = bug_chip
+
+        # Ensure exactly 4 suggestions
+        target = 4
+        while len(payload['suggestions']) > target:
+             payload['suggestions'].pop()
+        while len(payload['suggestions']) < target:
+             payload['suggestions'].append({"label": "Analyze Screen", "hint": "Explain what I'm looking at right now."})
              
         payload['screen_context'] = ctx.best_text()
         payload['window_title']   = ctx.window_title

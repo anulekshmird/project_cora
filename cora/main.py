@@ -299,9 +299,10 @@ class CoraApp(QObject):
         if hasattr(self, 'bubble') and hasattr(self.bubble, 'set_context_status'):
             self.bubble.set_context_status(ctx)
             
-            # Ensure bubble stays visible but don't force show every time (causes flickering)
-            if not self.chat_win.isVisible() and not self.bubble.isVisible():
+            # Ensure bubble stays visible
+            if not self.bubble.isVisible():
                 self.bubble.show()
+                self.bubble.raise_()
 
             # ONLY enter idle mode if we are NOT currently showing a suggestion or regional info
             is_region = (ctx.source == 'region')
@@ -664,7 +665,8 @@ class CoraApp(QObject):
         # if self.was_chat_visible:
         #    self.chat_win.hide()  <-- CAUSING BLINKING. User prefers it content visible.
         if self.was_bubble_visible:
-            self.bubble.hide()
+            # self.bubble.hide() # UNCOMMENT if user reports capture issues, but preferring visibility
+            pass
             
     def restore_ui_after_capture(self):
         # Restore state

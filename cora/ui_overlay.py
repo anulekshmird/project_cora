@@ -616,12 +616,9 @@ class ProactiveBubble(QWidget):
         self.is_read_more_expanded = False
         self.ask_input.clear()
 
-        if suggestion_type == 'syntax_error' and "Analyzing" not in reason:
-            self.is_expanded = True
-            self.panel.show()
-        else:
-            self.is_expanded = False
-            self.panel.hide()
+        # Always keep panel expanded
+        self.is_expanded = True
+        self.panel.show()
 
         self.content_label.setText(reason)
         if reason_long:
@@ -686,71 +683,69 @@ class ProactiveBubble(QWidget):
                 {"label": "Fix Error", "action": "fix_error"},
                 {"label": "Explain",   "action": "explain_error"},
                 {"label": "Show Code", "action": "show_code"},
+                {"label": "Review Code", "action": "explain_error"},
             ])
         else:
             suggestions = data.get('suggestions', [])
             if not suggestions:
                 FALLBACKS = {
                     'writing_suggestion':      [
-                        {"label": "Summarize text",   "hint": "Summarize the visible document text"},
-                        {"label": "Fix grammar",     "hint": "Correct grammar and spelling in this text"},
-                        {"label": "Improve clarity", "hint": "Make this text clearer and easier to read"},
-                        {"label": "Continue flow",   "hint": "Help me continue writing this section"},
+                        {"label": "Summarize",       "hint": "Summarize this content"},
+                        {"label": "Fix Grammar",     "hint": "Fix grammar issues"},
+                        {"label": "Improve Clarity", "hint": "Improve text clarity"},
+                        {"label": "Check Tone",      "hint": "Analyze the tone of the writing"},
                     ],
                     'reading_suggestion':      [
-                        {"label": "Summarize page",   "hint": "Summarize the visible page content"},
-                        {"label": "Explain topics",  "hint": "Explain the key topics on this page"},
-                        {"label": "Extract points",  "hint": "List the most important takeaways"},
-                        {"label": "Find insights",   "hint": "Provide interesting insights from this text"},
+                        {"label": "Summarize Page",   "hint": "Summarize the visible page"},
+                        {"label": "Explain Concepts", "hint": "Explain key concepts on this page"},
+                        {"label": "Key Points",       "hint": "Extract key points as bullets"},
+                        {"label": "Deep Dive",        "hint": "Provide a deep analysis of the topics mentioned"},
                     ],
                     'pdf_suggestion':          [
-                        {"label": "Summarize PDF",  "hint": "Summarize this PDF page"},
-                        {"label": "Extract facts",  "hint": "List the core facts from this document"},
-                        {"label": "Explain terms",  "hint": "Define any technical terms shown here"},
-                        {"label": "Analyze chart",  "hint": "Explain any visible data or charts"},
+                        {"label": "Summarize Page", "hint": "Summarize the visible PDF page"},
+                        {"label": "Key Points",     "hint": "Extract key points"},
+                        {"label": "Explain Terms",  "hint": "Explain technical terms"},
+                        {"label": "OCR Check",      "hint": "Verify text extraction accuracy"},
                     ],
                     'spreadsheet_suggestion':  [
-                        {"label": "Explain formula", "hint": "Explain the visible spreadsheet formulas"},
-                        {"label": "Analyze data",    "hint": "Identify patterns in this data"},
-                        {"label": "Summarize sheet", "hint": "Give me a high-level summary of this sheet"},
-                        {"label": "Suggest calc",    "hint": "What calculation should I perform next?"},
+                        {"label": "Explain Formula", "hint": "Explain visible formulas"},
+                        {"label": "Analyze Data",    "hint": "Find patterns in visible data"},
+                        {"label": "Summarize Sheet", "hint": "Provide an overview of this sheet"},
+                        {"label": "Extract Totals",  "hint": "Identify sums or totals on screen"},
                     ],
                     'youtube_suggestion':      [
-                        {"label": "Summarize video", "hint": "Summarize the video topic/content"},
-                        {"label": "Extract points",  "hint": "List the main points discussed"},
-                        {"label": "Explain context", "hint": "Explain the context of this video"},
-                        {"label": "Suggest similar", "hint": "What else should I watch regarding this?"},
+                        {"label": "Explain Topic", "hint": "Explain the video topic from title"},
+                        {"label": "Key Points",    "hint": "Extract visible subtitle points"},
                     ],
                     'browser_suggestion':      [
-                        {"label": "Summarize page", "hint": "Provide a summary of this web page"},
-                        {"label": "Key takeaways",  "hint": "What are the most important ideas here?"},
-                        {"label": "Search topic",   "hint": "Help me find more about this topic"},
-                        {"label": "Analyze site",   "hint": "Tell me about this website and its content"},
+                        {"label": "Summarize",  "hint": "Summarize this page"},
+                        {"label": "Key Ideas",  "hint": "Extract key ideas from this page"},
+                        {"label": "Related Topics", "hint": "Find information related to this page"},
+                        {"label": "Page Analysis", "hint": "Provide a detailed analysis of the page structure"},
                     ],
                     'developer_suggestion':    [
-                        {"label": "Check for bugs", "hint": "Scan the code for potential issues"},
-                        {"label": "Explain logic",  "hint": "Explain how this code works"},
-                        {"label": "Optimize code",  "hint": "Suggest ways to make this code better"},
-                        {"label": "Find patterns",  "hint": "Identify architectural patterns here"},
+                        {"label": "Explain Code", "hint": "Explain the visible code"},
+                        {"label": "Find Issues",  "hint": "Identify potential issues in the code"},
+                        {"label": "Optimize Logic", "hint": "Suggest ways to make this code faster or cleaner"},
+                        {"label": "Check for bugs", "hint": "Check the visible code for potential issues or bugs."},
                     ],
                     'presentation_suggestion': [
-                        {"label": "Improve slide",  "hint": "Refine the content on this slide"},
-                        {"label": "Speaker notes",  "hint": "Write notes for this slide"},
-                        {"label": "Summarize deck", "hint": "Summarize the entire presentation"},
-                        {"label": "Fix layout",     "hint": "Suggest better layout for this slide"},
+                        {"label": "Improve Slide",  "hint": "Improve the current slide content"},
+                        {"label": "Speaker Notes",  "hint": "Write speaker notes for this slide"},
+                        {"label": "Summarize Deck", "hint": "Summarize the presentation so far"},
                     ],
                     'ai_suggestion': [
-                        {"label": "Improve prompt",  "hint": "Make my last prompt better"},
-                        {"label": "Next ideas",      "hint": "Give me follow-up questions"},
-                        {"label": "Summarize chat",  "hint": "Summarize our conversation so far"},
-                        {"label": "Explain AI",      "hint": "Explain the AI reasoning here"},
+                        {"label": "Improve Prompt",  "hint": "Help me write a better prompt"},
+                        {"label": "Follow-up Ideas", "hint": "Suggest follow-up questions"},
+                        {"label": "Summarize Chat",  "hint": "Summarize the current conversation"},
+                        {"label": "Explain Response", "hint": "Explain the previous response in more detail"},
                     ],
                 }
                 suggestions = FALLBACKS.get(suggestion_type, [
-                    {"label": "Summarize page",   "hint": "Summarize the visible text or document"},
-                    {"label": "Key takeaways",   "hint": "Extract the specific main points from this"},
-                    {"label": "Deep analysis",   "hint": "Apply deep analysis to the visible elements"},
-                    {"label": "Check for issues", "hint": "Look for grammar, bugs, or logical errors"},
+                    {"label": "Summarize Content",   "hint": "Provide a summary of the visible page"},
+                    {"label": "Key Takeaways",       "hint": "Extract the most important points"},
+                    {"label": "Deep Analysis",       "hint": "Perform a detailed analysis of the elements"},
+                    {"label": "Next Steps",          "hint": "Suggest what to do next based on this content"},
                 ])
             self._add_suggestion_chips(suggestions)
 
@@ -962,8 +957,8 @@ class ProactiveBubble(QWidget):
         self.anim.stop()
         self.opacity_effect.setOpacity(1.0)
         self.current_data = None
-        self.is_expanded = False
-        self.panel.hide()
+        self.is_expanded = True # Keep expanded
+        self.panel.show() # Keep panel visible
         self._set_orb_state(self.STATE_IDLE)
         self.update_layout_pos()
         self.show()

@@ -486,6 +486,12 @@ class ChatWindow(QMainWindow):
         self.setWindowTitle("Cora AI")
         self.setMinimumSize(1000, 750)
         
+        # Ensure Chat Window stays on top
+        self.setWindowFlags(
+            self.windowFlags() | 
+            Qt.WindowType.WindowStaysOnTopHint
+        )
+        
         self.recognizer = sr.Recognizer() if sr else None
         self.voice_thread = None
         self.is_generating = False

@@ -54,8 +54,6 @@ _SITE_PATTERNS = {
     "news":          ("reading",   "article"),
     "bbc":           ("reading",   "news"),
     "cnn":           ("reading",   "news"),
-    "word":          ("writing",   "document"),
-    "winword":       ("writing",   "document"),
 }
 
 
