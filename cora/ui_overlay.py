@@ -461,7 +461,10 @@ class ProactiveBubble(QWidget):
         if self.is_expanded:
             total_w += self.panel_width + 15
             self.panel.setFixedSize(self.panel_width, current_panel_h)
-        total_h = max(self.bubble_size, current_panel_h) + self.margin
+        
+        # FIX: total_h should only include panel height if expanded
+        actual_content_h = max(self.bubble_size, current_panel_h) if self.is_expanded else self.bubble_size
+        total_h = actual_content_h + self.margin
         
         if self.user_bubble_pos:
             # Respect user's dragged position for the ORB
@@ -866,7 +869,8 @@ class ProactiveBubble(QWidget):
             self.dynamic_btns_layout.addWidget(btn)
 
     def _on_dismiss_clicked(self):
-        self.enter_idle_mode()
+        self.hide_bubble()
+        self._set_orb_state(self.STATE_IDLE)
         self.dismissed.emit()
 
     def _add_suggestion_chips(self, suggestions):
@@ -933,9 +937,9 @@ class ProactiveBubble(QWidget):
         if not self.is_expanded:
             self.is_expanded = True
             self.panel.show()
-            self.update_layout_pos()
-        # Intentionally never collapse on orb click
-        # Only Dismiss button collapses the panel
+        else:
+            self.hide_bubble()
+        self.update_layout_pos()
 
     def toggle_read_more(self):
         if not self.current_data:
@@ -957,8 +961,8 @@ class ProactiveBubble(QWidget):
         self.anim.stop()
         self.opacity_effect.setOpacity(1.0)
         self.current_data = None
-        self.is_expanded = True # Keep expanded
-        self.panel.show() # Keep panel visible
+        self.is_expanded = False # FIX: Collapse by default in idle mode
+        self.panel.hide() # FIX: Ensure panel is hidden
         self._set_orb_state(self.STATE_IDLE)
         self.update_layout_pos()
         self.show()

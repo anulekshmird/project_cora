@@ -13,48 +13,7 @@ from PyQt6.QtWidgets import (
 )
 import formatter
 
-try:
-    import speech_recognition as sr
-except ImportError:
-    sr = None
-    print("Speech Recognition not found. Voice features disabled.")
 
-# --- Voice Worker (unchanged from original) ---
-class VoiceWorker(QThread):
-    text_ready = pyqtSignal(str)
-    finished = pyqtSignal()
-    
-    def __init__(self, recognizer):
-        super().__init__()
-        self.recognizer = recognizer
-        self.running = False
-
-    def run(self):
-        self.running = True
-        print("VoiceWorker: Starting...")
-        try:
-            with sr.Microphone() as source:
-                self.recognizer.adjust_for_ambient_noise(source, duration=1.0)
-                while self.running:
-                    try:
-                        audio = self.recognizer.listen(source, timeout=5, phrase_time_limit=10)
-                        text = self.recognizer.recognize_google(audio)
-                        if text:
-                            self.text_ready.emit(text)
-                    except sr.WaitTimeoutError:
-                        continue
-                    except sr.UnknownValueError:
-                        continue
-                    except sr.RequestError as e:
-                         print(f"VoiceWorker: Request Error: {e}")
-                         break
-        except Exception as e:
-            print(f"Voice Error: {e}")
-        finally:
-            self.finished.emit()
-
-    def stop(self):
-        self.running = False
 
 # --- Modern Message Bubble ---
 class MessageBubble(QFrame):
@@ -349,11 +308,6 @@ class ModernInputArea(QFrame):
         self.input_field.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         self.input_field.installEventFilter(self) # Install filter to catch Enter
         
-        # Voice button
-        self.voice_btn = QPushButton("🎤")
-        self.voice_btn.setFixedSize(36, 36)
-        self.voice_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.voice_btn.clicked.connect(self.toggle_voice)
         
         # Send button
         self.send_btn = QPushButton("➤")
@@ -364,7 +318,6 @@ class ModernInputArea(QFrame):
         
         input_layout.addWidget(self.attach_btn)
         input_layout.addWidget(self.input_field)
-        input_layout.addWidget(self.voice_btn)
         input_layout.addWidget(self.send_btn)
         
         layout.addWidget(self.chip_container)
@@ -441,8 +394,6 @@ class ModernInputArea(QFrame):
         self.current_attachment = None
         self.chip_container.setVisible(False)
         
-    def toggle_voice(self):
-        pass # Signal handled by main wrapper
         
     def send_message(self):
         # Check if button is in STOP mode (text is square)
@@ -492,8 +443,6 @@ class ChatWindow(QMainWindow):
             Qt.WindowType.WindowStaysOnTopHint
         )
         
-        self.recognizer = sr.Recognizer() if sr else None
-        self.voice_thread = None
         self.is_generating = False
         
         self.init_ui()
@@ -564,7 +513,6 @@ class ChatWindow(QMainWindow):
         # Input area
         self.input_area = ModernInputArea()
         self.input_area.message_sent.connect(self.handle_send)
-        self.input_area.voice_btn.clicked.connect(self.toggle_voice)
         
         content_layout.addWidget(header)
         content_layout.addWidget(self.chat_display, 1) # Added stretch
@@ -762,24 +710,6 @@ class ChatWindow(QMainWindow):
         
     def delete_chat(self, session_id):
         self.delete_session_signal.emit(session_id)
-        
-    def toggle_voice(self):
-        if not self.recognizer:
-            QMessageBox.warning(self, "Voice Error", "Speech Recognition module not installed.")
-            return
-            
-        if self.voice_thread and self.voice_thread.isRunning():
-            self.voice_thread.stop()
-            self.input_area.voice_btn.setStyleSheet("color: #94A3B8; border: none; background: transparent; font-size: 18px;")
-        else:
-            self.input_area.voice_btn.setStyleSheet("color: #EF4444; border: none; background: transparent; font-size: 18px; font-weight: bold;")
-            self.voice_thread = VoiceWorker(self.recognizer)
-            self.voice_thread.text_ready.connect(lambda t: self.input_area.input_field.insertPlainText(t + " "))
-            self.voice_thread.finished.connect(self.on_voice_finished)
-            self.voice_thread.start()
-            
-    def on_voice_finished(self):
-        self.input_area.voice_btn.setStyleSheet("color: #94A3B8; border: none; background: transparent; font-size: 18px;")
         
     def load_sessions(self, sessions):
         pass # Sidebar removed

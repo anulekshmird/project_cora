@@ -85,24 +85,6 @@ class ContextExtractor:
         else:
             return Context()
 
-    def _from_window(self, data: dict) -> Context:
-        title = data.get('window_title', '')
-        tl    = title.lower()
-        use_window_only = data.get('use_window_capture', False)
-
-        is_claude = 'claude' in tl
-
-        # Skip OCR entirely for Claude/AI windows
-        if is_claude:
-            return Context(
-                app          = 'claude',
-                mode         = 'ai',
-                window_title = title,
-                visible_text = '',
-                source       = 'window',
-                timestamp    = data.get('timestamp', time.time()),
-            )
-
     def _classify_and_enrich(self, title: str) -> dict:
         tl = title.lower()
         # Classify app and mode
